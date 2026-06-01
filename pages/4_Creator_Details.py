@@ -25,10 +25,10 @@ if not edit_mode:
     with col1:
         st.markdown("### Basic Info")
         st.write(f"**Code:** {creator['creator_code']}")
-        # Using 'or' to handle None values from the database
-        st.write(f"**Email:** {creator['email'] or 'N/A'}")
-        st.write(f"**Phone:** {creator['phone_number'] or 'N/A'}")
-        st.write(f"**Notes:** {creator['notes'] or 'N/A'}")
+        # Using 'or' to safely handle None values from the database
+        st.write(f"**Email:** {creator.get('email') or 'N/A'}")
+        st.write(f"**Phone:** {creator.get('phone_number') or 'N/A'}")
+        st.write(f"**Notes:** {creator.get('notes') or 'N/A'}")
     with col2:
         st.markdown("### Financial Info")
         st.write(f"**Legal Name:** {fin_data.get('legal_name') or 'N/A'}")
@@ -45,41 +45,60 @@ if not edit_mode:
 # ================= EDIT MODE =================
 else:
     st.markdown("### ✏️ Edit Creator")
+    
+    # Helper function to guarantee we never pass None to Streamlit inputs
+    def safe_str(val):
+        return str(val) if val is not None else ''
+
     with st.form("edit_form"):
-        # Added 'or ""' to prevent NoneType errors in text inputs
-        c_email = st.text_input("Email", value=creator['email'] or '')
-        c_phone = st.text_input("Phone", value=creator['phone_number'] or '')
-        c_notes = st.text_area("Notes", value=creator['notes'] or '')
-        c_status = st.selectbox("Status", ["ACTIVE", "INACTIVE", "BLOCKED"], index=["ACTIVE", "INACTIVE", "BLOCKED"].index(creator['status']))
+        c_email = st.text_input("Email", value=safe_str(creator.get('email')))
+        c_phone = st.text_input("Phone", value=safe_str(creator.get('phone_number')))
+        c_notes = st.text_area("Notes", value=safe_str(creator.get('notes')))
+        
+        current_status = creator.get('status', 'ACTIVE')
+        c_status = st.selectbox(
+            "Status", 
+            ["ACTIVE", "INACTIVE", "BLOCKED"], 
+            index=["ACTIVE", "INACTIVE", "BLOCKED"].index(current_status)
+        )
         
         st.markdown("### Financial Info")
-        f_legal = st.text_input("Legal Name", value=fin_data.get('legal_name') or '')
-        # THIS WAS THE CRASH POINT: Added 'or ""' before .upper()
-        f_pan = st.text_input("PAN", value=fin_data.get('pan_number') or '').upper()
-        f_upi = st.text_input("UPI ID", value=fin_data.get('upi_id') or '')
-        f_bank = st.text_input("Bank Name", value=fin_data.get('bank_name') or '')
-        f_holder = st.text_input("Account Holder", value=fin_data.get('account_holder_name') or '')
-        f_acc = st.text_input("Acc Last 4", value=fin_data.get('account_number_last4') or '')
-        f_ifsc = st.text_input("IFSC", value=fin_data.get('ifsc') or '')
+        f_legal = st.text_input("Legal Name", value=safe_str(fin_data.get('legal_name')))
+        
+        # CRASH FIX: Safely coerce to string, handle None, then uppercase
+        pan_val = str(fin_data.get('pan_number') or '')
+        f_pan = st.text_input("PAN", value=pan_val.upper())
+        
+        f_upi = st.text_input("UPI ID", value=safe_str(fin_data.get('upi_id')))
+        f_bank = st.text_input("Bank Name", value=safe_str(fin_data.get('bank_name')))
+        f_holder = st.text_input("Account Holder", value=safe_str(fin_data.get('account_holder_name')))
+        f_acc = st.text_input("Acc Last 4", value=safe_str(fin_data.get('account_number_last4')))
+        f_ifsc = st.text_input("IFSC", value=safe_str(fin_data.get('ifsc')))
         
         submitted = st.form_submit_button("Save Changes")
         
         if submitted:
             if f_pan and not validate_pan(f_pan):
-                st.error("Invalid PAN format. Must be 5 letters, 4 numbers, 1 letter.")
+                st.error("Invalid PAN format. Must be 5 letters, 4 numbers, 1 letter (e.g., ABCDE1234F).")
             else:
                 supabase.table('creators').update({
-                    "email": c_email, "phone_number": c_phone, 
-                    "notes": c_notes, "status": c_status
+                    "email": c_email, 
+                    "phone_number": c_phone, 
+                    "notes": c_notes, 
+                    "status": c_status
                 }).eq('id', creator_id).execute()
                 
                 if fin_data:
                     supabase.table('creator_financial_info').update({
-                        "legal_name": f_legal, "pan_number": f_pan, "upi_id": f_upi,
-                        "bank_name": f_bank, "account_holder_name": f_holder,
-                        "account_number_last4": f_acc, "ifsc": f_ifsc
+                        "legal_name": f_legal, 
+                        "pan_number": f_pan, 
+                        "upi_id": f_upi,
+                        "bank_name": f_bank, 
+                        "account_holder_name": f_holder,
+                        "account_number_last4": f_acc, 
+                        "ifsc": f_ifsc
                     }).eq('creator_id', creator_id).execute()
                     
-                st.success("Updated successfully!")
+                st.success("✅ Updated successfully!")
                 st.session_state['edit_mode'] = False
                 st.rerun()

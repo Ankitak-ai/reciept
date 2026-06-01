@@ -7,7 +7,7 @@ st.set_page_config(page_title="Razorpay Payments", page_icon="💳", layout="wid
 st.title("💳 Razorpay Payment Sync & Management")
 
 # Get your Edge Function URL from the Supabase Dashboard
-EDGE_FUNCTION_URL = "https://your-project-id.supabase.co/functions/v1/sync-razorpay"
+EDGE_FUNCTION_URL = "https://ewbaqylcvdmbigtjarow.supabase.co/functions/v1/sync-razorpay"
 
 # ==============================================================================
 # 1. SYNC CONTROLS (Now just a simple HTTP trigger)

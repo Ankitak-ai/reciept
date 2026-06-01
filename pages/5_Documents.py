@@ -1,6 +1,9 @@
 import streamlit as st
 from utils.supabase_client import supabase
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Documents", page_icon="📄")
 st.title("📄 Document Management")
 

@@ -1,6 +1,7 @@
 import requests
 import streamlit as st
 import time
+import datetime # <-- ADDED: Required for timestamp conversion
 from utils.supabase_client import supabase
 
 def sync_razorpay_payments():
@@ -86,6 +87,19 @@ def sync_razorpay_payments():
 
             # 8. Insert payment into database
             try:
+                # ==========================================
+                # FIX: Convert Razorpay Unix timestamp (integer) 
+                # to ISO 8601 string for PostgreSQL TIMESTAMPTZ
+                # ==========================================
+                created_at_ts = payment.get("created_at")
+                created_at_formatted = None
+                if created_at_ts:
+                    try:
+                        dt_obj = datetime.datetime.fromtimestamp(created_at_ts, tz=datetime.timezone.utc)
+                        created_at_formatted = dt_obj.isoformat()
+                    except (ValueError, TypeError, OSError):
+                        created_at_formatted = None
+
                 payment_record = {
                     "payment_id": payment_id,
                     "order_id": order_id,
@@ -97,7 +111,7 @@ def sync_razorpay_payments():
                     "method": payment.get("method"),
                     "email": payment.get("email"),
                     "contact": payment.get("contact"),
-                    "created_at": payment.get("created_at"),
+                    "created_at": created_at_formatted, # <-- FIX APPLIED HERE
                     "raw_payment_payload": payment,
                     "raw_order_payload": raw_order_payload
                 }

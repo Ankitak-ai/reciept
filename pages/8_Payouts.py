@@ -19,7 +19,6 @@ with tab_generate:
     st.markdown("### 📅 Select Payout Cycle (All dates calculated in IST)")
     col1, col2, col3 = st.columns(3)
     
-    # Default to last month
     today = datetime.date.today()
     first_day_last_month = today.replace(day=1) - datetime.timedelta(days=1)
     default_start = first_day_last_month.replace(day=1)
@@ -40,23 +39,16 @@ with tab_generate:
         selected_creator_label = st.selectbox("Select Creator", options=list(creator_options.keys()))
         selected_creator_id = creator_options[selected_creator_label]
 
-    # ==============================================================================
-    # CRITICAL FIX: IST BOUNDARY CALCULATION
-    # ==============================================================================
-    # 1. Combine the selected date with IST start/end of day
+    # IST BOUNDARY CALCULATION
     start_dt_ist = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=IST)
     end_dt_ist = datetime.datetime.combine(end_date, datetime.time.max, tzinfo=IST)
-    
-    # 2. Convert those exact IST moments to UTC for the Supabase query
     start_iso = start_dt_ist.astimezone(datetime.timezone.utc).isoformat()
     end_iso = end_dt_ist.astimezone(datetime.timezone.utc).isoformat()
     
     st.caption(f"🕒 Querying from: `{to_ist(start_iso)}` to `{to_ist(end_iso)}`")
 
-    # --- PREVIEW LOGIC ---
     if st.button("🔍 Preview Payout Calculation", type="secondary", width="stretch"):
         with st.spinner("Calculating unsettled payments and refunds..."):
-            
             preview_data = []
             target_creators = creators_list if selected_creator_id == "ALL" else [next(c for c in creators_list if c['id'] == selected_creator_id)]
             
@@ -64,7 +56,6 @@ with tab_generate:
                 cid = creator['id']
                 rate = float(creator.get('payout_rate', 89.0))
                 
-                # Fetch UNSETTLED payments within the exact IST boundaries
                 payments_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr')\
                     .eq('creator_id', cid)\
                     .eq('is_settled', False)\
@@ -78,7 +69,6 @@ with tab_generate:
                 fees = sum(p.get('fee_inr', 0) or 0 for p in payments)
                 tax = sum(p.get('tax_inr', 0) or 0 for p in payments)
                 
-                # Fetch refunds within the exact IST boundaries
                 refunds_res = supabase.table('refunds').select('amount_inr')\
                     .eq('creator_id', cid)\
                     .gte('created_at', start_iso)\
@@ -87,11 +77,13 @@ with tab_generate:
                 refunds = refunds_res.data or []
                 total_refunded = sum(r.get('amount_inr', 0) or 0 for r in refunds)
                 
-                # Calculate Final Math
-                net_base = gross - fees - tax
-                final_net = net_base - total_refunded
-                creator_share = round(final_net * (rate / 100))
-                platform_comm = final_net - creator_share
+                # ==========================================
+                # GROSS-BASED PAYOUT MATH (Platform absorbs fees)
+                # ==========================================
+                adjusted_gross = gross - total_refunded
+                creator_share = round(adjusted_gross * (rate / 100))
+                platform_commission = adjusted_gross - creator_share
+                platform_net_profit = platform_commission - fees - tax
                 
                 preview_data.append({
                     "Creator": creator['creator_handle'],
@@ -99,15 +91,15 @@ with tab_generate:
                     "Rate": f"{rate}%",
                     "Txns": len(payments),
                     "Gross (INR)": format_inr(gross),
-                    "Fees (INR)": format_inr(fees),
                     "Refunds (INR)": format_inr(total_refunded),
-                    "Net Base (INR)": format_inr(net_base),
                     "Creator Payout (INR)": format_inr(creator_share),
-                    "Platform Cut (INR)": format_inr(platform_comm),
+                    "Platform Comm. (INR)": format_inr(platform_commission),
+                    "Razorpay Cuts (INR)": format_inr(fees + tax),
+                    "Platform Net Profit": format_inr(platform_net_profit),
+                    # Raw integers for DB commit
                     "_gross": gross, "_fees": fees, "_tax": tax, "_refunded": total_refunded,
-                    "_net_base": net_base, "_final_net": final_net, 
-                    "_creator_share": creator_share, "_platform_comm": platform_comm,
-                    "_rate": rate, "_cid": cid
+                    "_creator_share": creator_share, "_platform_comm": platform_commission,
+                    "_cid": cid
                 })
             
             if not preview_data:
@@ -117,7 +109,6 @@ with tab_generate:
                 st.session_state['payout_preview'] = preview_data
                 st.rerun()
 
-    # --- DISPLAY PREVIEW & COMMIT ---
     if 'payout_preview' in st.session_state and st.session_state['payout_preview']:
         st.markdown("---")
         st.markdown("### 📊 Payout Preview")
@@ -132,19 +123,17 @@ with tab_generate:
         
         col_sum1, col_sum2 = st.columns(2)
         col_sum1.metric("💸 Total to Pay Creators", format_inr(total_payout_out))
-        col_sum2.metric("🏦 Total Platform Revenue", format_inr(total_platform_in))
+        col_sum2.metric("🏦 Total Platform Commission", format_inr(total_platform_in))
         
         if st.button("🔒 Generate & Lock Payouts", type="primary", width="stretch"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             total_steps = len(st.session_state['payout_preview'])
-            
             success_count = 0
+            
             for idx, row in enumerate(st.session_state['payout_preview']):
                 status_text.text(f"Processing payout for {row['Creator']}...")
-                
                 try:
-                    # 1. Insert locked record into 'payouts' table
                     payout_insert = {
                         "creator_id": row['_cid'],
                         "cycle_start_date": start_date.isoformat(),
@@ -161,7 +150,6 @@ with tab_generate:
                     new_payout_res = supabase.table('payouts').insert(payout_insert).execute()
                     new_payout_id = new_payout_res.data[0]['id']
                     
-                    # 2. Mark underlying payments as settled
                     supabase.table('payments').update({
                         "is_settled": True,
                         "payout_id": new_payout_id
@@ -200,24 +188,19 @@ with tab_history:
         df_payouts['Creator'] = df_payouts['creators'].apply(lambda x: x['creator_handle'] if x else 'Unknown')
         df_payouts['Code'] = df_payouts['creators'].apply(lambda x: x['creator_code'] if x else 'Unknown')
         df_payouts['Gross'] = df_payouts['gross_amount_inr'].apply(format_inr)
-        df_payouts['Fees'] = df_payouts['razorpay_fees_inr'].apply(format_inr)
         df_payouts['Refunds'] = df_payouts['refunds_deducted_inr'].apply(format_inr)
-        df_payouts['Net Payout'] = df_payouts['creator_share_inr'].apply(format_inr)
-        df_payouts['Platform Cut'] = df_payouts['platform_commission_inr'].apply(format_inr)
-        
-        # Use the helper to format timestamps into readable IST strings
+        df_payouts['Creator Payout'] = df_payouts['creator_share_inr'].apply(format_inr)
+        df_payouts['Platform Comm.'] = df_payouts['platform_commission_inr'].apply(format_inr)
         df_payouts['Generated On'] = df_payouts['created_at'].apply(to_ist)
         
         display_payouts = df_payouts[[
             'Generated On', 'Creator', 'Code', 'cycle_start_date', 'cycle_end_date', 
-            'status', 'Gross', 'Fees', 'Refunds', 'Net Payout', 'Platform Cut', 'transaction_ref'
+            'status', 'Gross', 'Refunds', 'Creator Payout', 'Platform Comm.', 'transaction_ref'
         ]]
         
         st.dataframe(display_payouts, width="stretch", hide_index=True)
         
         st.divider()
-        
-        # --- UPDATE PAYOUT STATUS (RECONCILIATION) ---
         st.markdown("### 🏦 Mark Payout as PAID")
         st.caption("Once the bank transfer is complete, update the status and enter the transaction reference.")
         
@@ -227,7 +210,7 @@ with tab_history:
             st.success("🎉 All generated payouts have been marked as PAID!")
         else:
             payout_options = {
-                f"{row['Creator']} | {row['cycle_start_date']} to {row['cycle_end_date']} | {row['Net Payout']}": row['id'] 
+                f"{row['Creator']} | {row['cycle_start_date']} to {row['cycle_end_date']} | {row['Creator Payout']}": row['id'] 
                 for _, row in pending_payouts.iterrows()
             }
             
@@ -249,7 +232,6 @@ with tab_history:
                             "transaction_ref": utr_ref,
                             "payout_date": datetime.datetime.now(datetime.timezone.utc).isoformat()
                         }).eq('id', payout_id).execute()
-                        
                         st.success("✅ Payout marked as PAID successfully!")
                         st.rerun()
                     except Exception as e:

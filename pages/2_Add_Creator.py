@@ -7,8 +7,8 @@ st.title("➕ Add New Creator")
 
 with st.form("add_creator_form"):
     st.subheader("Basic Information")
-    c_code = st.text_input("Creator Code*", placeholder="e.g., CR001")
-    c_handle = st.text_input("Creator Handle*", placeholder="e.g., @creatorname")
+    c_code = st.text_input("Creator Code*", placeholder="e.g., lg")
+    c_handle = st.text_input("Creator Handle*", placeholder="e.g., Looteriya Gaming")
     c_email = st.text_input("Email")
     c_phone = st.text_input("Phone Number")
     c_notes = st.text_area("Notes")
@@ -30,27 +30,17 @@ with st.form("add_creator_form"):
         elif not validate_pan(f_pan):
             st.error("Invalid PAN format. Must be 5 letters, 4 numbers, 1 letter (e.g., ABCDE1234F).")
         else:
-            # Check duplicates
             check_code = supabase.table('creators').select('id').eq('creator_code', c_code).execute()
             check_handle = supabase.table('creators').select('id').eq('creator_handle', c_handle).execute()
             
             if check_code.data or check_handle.data:
                 st.error("Creator Code or Handle already exists.")
             else:
-                # Insert Creator
-                creator_data = {
-                    "creator_code": c_code, "creator_handle": c_handle, 
-                    "email": c_email, "phone_number": c_phone, "notes": c_notes
-                }
+                creator_data = {"creator_code": c_code, "creator_handle": c_handle, "email": c_email, "phone_number": c_phone, "notes": c_notes}
                 creator_res = supabase.table('creators').insert(creator_data).execute()
                 creator_id = creator_res.data[0]['id']
 
-                # Insert Financial Info
-                fin_data = {
-                    "creator_id": creator_id, "legal_name": f_legal, "pan_number": f_pan,
-                    "upi_id": f_upi, "bank_name": f_bank, "account_holder_name": f_holder,
-                    "account_number_last4": f_acc_last4, "ifsc": f_ifsc
-                }
+                fin_data = {"creator_id": creator_id, "legal_name": f_legal, "pan_number": f_pan, "upi_id": f_upi, "bank_name": f_bank, "account_holder_name": f_holder, "account_number_last4": f_acc_last4, "ifsc": f_ifsc}
                 supabase.table('creator_financial_info').insert(fin_data).execute()
                 
                 st.success(f"Creator {c_handle} created successfully!")

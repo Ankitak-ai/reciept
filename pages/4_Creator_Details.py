@@ -13,12 +13,21 @@ if 'selected_creator_id' not in st.session_state:
 creator_id = st.session_state['selected_creator_id']
 edit_mode = st.session_state.get('edit_mode', False)
 
-# Fetch Core Data
+# 1. Fetch Core Profile Data
 creator = supabase.table('creators').select('*').eq('id', creator_id).execute().data[0]
 financial = supabase.table('creator_financial_info').select('*').eq('creator_id', creator_id).execute()
 fin_data = financial.data[0] if financial.data else {}
 
-# Fetch Financial Ledger Data for Tab 2
+# 2. Fetch LIFETIME AGGREGATES for accurate Summary Metrics
+all_payments = supabase.table('payments').select('amount_inr, fee_inr, tax_inr').eq('creator_id', creator_id).execute().data or []
+all_refunds = supabase.table('refunds').select('amount_inr').eq('creator_id', creator_id).execute().data or []
+
+total_gross = sum(p.get('amount_inr', 0) or 0 for p in all_payments)
+total_fees = sum(p.get('fee_inr', 0) or 0 for p in all_payments)
+total_tax = sum(p.get('tax_inr', 0) or 0 for p in all_payments)
+total_refunded = sum(r.get('amount_inr', 0) or 0 for r in all_refunds)
+
+# 3. Fetch LEDGER DATA (Last 50 only) for the UI tables
 payments_res = supabase.table('payments').select(
     'payment_id, order_id, amount_inr, fee_inr, tax_inr, status, method, created_at, original_currency, original_amount'
 ).eq('creator_id', creator_id).order('created_at', desc=True).limit(50).execute()
@@ -66,30 +75,28 @@ if not edit_mode:
 
     # --- TAB 2: PAYMENTS & REFUNDS ---
     with tab_ledger:
-        # 1. Calculate Summary Metrics
-        payments_data = payments_res.data or []
-        refunds_data = refunds_res.data or []
         
-        total_gross = sum(p.get('amount_inr', 0) or 0 for p in payments_data)
-        total_fees = sum(p.get('fee_inr', 0) or 0 for p in payments_data)
-        total_tax = sum(p.get('tax_inr', 0) or 0 for p in payments_data)
-        total_refunded = sum(r.get('amount_inr', 0) or 0 for r in refunds_data)
-        
+        # Calculate derived metrics based on LIFETIME totals
         net_base = total_gross - total_fees - total_tax
         final_net = net_base - total_refunded
+        payout_rate = float(creator.get('payout_rate', 89))
+        creator_share = final_net * (payout_rate / 100)
+        platform_commission = final_net - creator_share
         
-        st.markdown("### 📊 Financial Summary (Last 50 Transactions)")
-        m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
+        st.markdown("### 📊 Lifetime Financial Summary")
+        m_col1, m_col2, m_col3, m_col4, m_col5, m_col6 = st.columns(6)
         m_col1.metric("Gross Amount", format_inr(total_gross))
         m_col2.metric("Razorpay Fees", format_inr(total_fees), delta_color="inverse")
         m_col3.metric("Refunds", format_inr(total_refunded), delta_color="inverse")
-        m_col4.metric("Net Base", format_inr(net_base))
-        m_col5.metric("Creator Share (Est)", format_inr(final_net * (float(creator.get('payout_rate', 89)) / 100)), help=f"Calculated at {creator.get('payout_rate', 89)}% payout rate")
+        m_col4.metric("Net Base", format_inr(net_base), help="Gross - Fees - Refunds")
+        m_col5.metric("Creator Share", format_inr(creator_share), help=f"Net Base × {payout_rate}%")
+        m_col6.metric("Platform Commission", format_inr(platform_commission), help=f"Net Base × {100 - payout_rate}%")
 
         st.divider()
 
-        # 2. Payments Dataframe
-        st.markdown("### 💸 Recent Payments")
+        # 1. Payments Dataframe
+        st.markdown("### 💸 Recent Payments (Last 50)")
+        payments_data = payments_res.data or []
         if not payments_data:
             st.info("No payments found for this creator yet.")
         else:
@@ -113,8 +120,9 @@ if not edit_mode:
 
         st.divider()
 
-        # 3. Refunds Dataframe
-        st.markdown("### ↩️ Recent Refunds")
+        # 2. Refunds Dataframe
+        st.markdown("### ↩️ Recent Refunds (Last 50)")
+        refunds_data = refunds_res.data or []
         if not refunds_data:
             st.info("No refunds found for this creator. (This is good!)")
         else:
@@ -134,7 +142,7 @@ if not edit_mode:
             )
 
 # ==============================================================================
-# EDIT MODE (Unchanged, just renders the form directly)
+# EDIT MODE
 # ==============================================================================
 else:
     st.markdown("### ✏️ Edit Creator")
@@ -147,7 +155,6 @@ else:
         c_phone = st.text_input("Phone", value=safe_str(creator.get('phone_number')))
         c_notes = st.text_area("Notes", value=safe_str(creator.get('notes')))
         
-        # Added Payout Rate to the edit form!
         c_payout_rate = st.number_input(
             "Payout Rate (%)", 
             min_value=0.0, 
@@ -185,7 +192,7 @@ else:
                     "phone_number": c_phone, 
                     "notes": c_notes, 
                     "status": c_status,
-                    "payout_rate": c_payout_rate # Save the new rate!
+                    "payout_rate": c_payout_rate
                 }).eq('id', creator_id).execute()
                 
                 if fin_data:

@@ -3,6 +3,9 @@ import pandas as pd
 import requests
 from utils.supabase_client import supabase
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Refund Management", page_icon="💸", layout="wide")
 st.title("💸 Razorpay Refund Sync & Ledger")
 

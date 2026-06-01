@@ -21,7 +21,7 @@ def sync_razorpay_payments():
 
     try:
         # ==========================================
-        # 1. ROBUST PAGINATION LOGIC (Fetch ALL payments)
+        # 1. ROBUST PAGINATION LOGIC (Fetch ALL successful payments)
         # ==========================================
         skip = 0
         count = 100
@@ -30,10 +30,12 @@ def sync_razorpay_payments():
         
         progress_bar = st.progress(0)
         status_text = st.empty()
-        status_text.text("Fetching payments from Razorpay...")
+        status_text.text("Fetching successful payments from Razorpay...")
 
         while True:
-            url = f"https://api.razorpay.com/v1/payments?count={count}"
+            # FIX: Added &status=captured to ONLY fetch successful, collected payments.
+            # This filters out 'failed' and 'authorized' (pending) payments at the API level.
+            url = f"https://api.razorpay.com/v1/payments?count={count}&status=captured"
             
             # Use time-based pagination after 1000 records to avoid Razorpay's skip limit
             if to_timestamp:
@@ -50,7 +52,7 @@ def sync_razorpay_payments():
                 
             all_payments.extend(payments_data)
             metrics["fetched"] = len(all_payments)
-            status_text.text(f"Fetched {metrics['fetched']} payments...")
+            status_text.text(f"Fetched {metrics['fetched']} successful payments...")
             
             if len(payments_data) < count:
                 break
@@ -60,7 +62,7 @@ def sync_razorpay_payments():
                 # Infinite loop guard: If the oldest timestamp in this batch is identical 
                 # to the previous batch, we've hit Razorpay's 1-second resolution limit.
                 if new_to == to_timestamp:
-                    st.warning(f"⚠️ Reached Razorpay's time-based pagination limit at timestamp {to_timestamp}. Over 100 payments occurred in the exact same second. Older payments beyond this point could not be fetched.")
+                    st.warning(f"⚠️ Reached Razorpay's time-based pagination limit at timestamp {to_timestamp}. Over 100 successful payments occurred in the exact same second. Older payments beyond this point could not be fetched.")
                     break
                 to_timestamp = new_to
             else:

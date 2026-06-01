@@ -12,14 +12,12 @@ if 'selected_creator_id' not in st.session_state:
 creator_id = st.session_state['selected_creator_id']
 edit_mode = st.session_state.get('edit_mode', False)
 
-# Fetch Data
 creator = supabase.table('creators').select('*').eq('id', creator_id).execute().data[0]
 financial = supabase.table('creator_financial_info').select('*').eq('creator_id', creator_id).execute()
 fin_data = financial.data[0] if financial.data else {}
 
 st.subheader(f"@{creator['creator_handle']} ({creator['status']})")
 
-# View Mode
 if not edit_mode:
     col1, col2 = st.columns(2)
     with col1:
@@ -40,10 +38,6 @@ if not edit_mode:
     if st.button("Back to List"):
         st.session_state['edit_mode'] = False
         st.switch_page("pages/3_Creator_List.py")
-        
-    st.session_state['edit_mode'] = False # Reset for next visit
-
-# Edit Mode
 else:
     st.markdown("### ✏️ Edit Creator")
     with st.form("edit_form"):
@@ -66,18 +60,9 @@ else:
             if not validate_pan(f_pan):
                 st.error("Invalid PAN format.")
             else:
-                supabase.table('creators').update({
-                    "email": c_email, "phone_number": c_phone, 
-                    "notes": c_notes, "status": c_status
-                }).eq('id', creator_id).execute()
-                
+                supabase.table('creators').update({"email": c_email, "phone_number": c_phone, "notes": c_notes, "status": c_status}).eq('id', creator_id).execute()
                 if fin_data:
-                    supabase.table('creator_financial_info').update({
-                        "legal_name": f_legal, "pan_number": f_pan, "upi_id": f_upi,
-                        "bank_name": f_bank, "account_holder_name": f_holder,
-                        "account_number_last4": f_acc, "ifsc": f_ifsc
-                    }).eq('creator_id', creator_id).execute()
-                    
+                    supabase.table('creator_financial_info').update({"legal_name": f_legal, "pan_number": f_pan, "upi_id": f_upi, "bank_name": f_bank, "account_holder_name": f_holder, "account_number_last4": f_acc, "ifsc": f_ifsc}).eq('creator_id', creator_id).execute()
                 st.success("Updated successfully!")
                 st.session_state['edit_mode'] = False
                 st.rerun()

@@ -13,7 +13,8 @@ st.markdown("### 🔄 Sync Controls")
 col1, col2 = st.columns([1, 3])
 
 with col1:
-    if st.button("🔄 Sync Razorpay Payments", type="primary", use_container_width=True):
+    # FIX: Replaced use_container_width=True with width="stretch"
+    if st.button("🔄 Sync Razorpay Payments", type="primary", width="stretch"):
         with st.spinner("Fetching payments and matching creators... This may take a moment."):
             metrics, unmapped, errors = sync_razorpay_payments()
             
@@ -44,9 +45,10 @@ if "sync_metrics" in st.session_state:
     # Show Unmapped Receipts Details
     if st.session_state.get("unmapped_receipts"):
         with st.expander(f"⚠️ View {len(st.session_state['unmapped_receipts'])} Unmapped Receipts"):
+            # FIX: Replaced use_container_width=True with width="stretch"
             st.dataframe(
                 pd.DataFrame(st.session_state["unmapped_receipts"]), 
-                use_container_width=True, 
+                width="stretch", 
                 hide_index=True
             )
             st.info("💡 Tip: Ensure the creator's `creator_code` matches the prefix of the Razorpay receipt (e.g., receipt 'mc_rp_123' requires creator_code 'mc').")
@@ -97,15 +99,15 @@ else:
 
     # Reorder and clean columns for display
     display_cols = ['created_at', 'payment_id', 'creator', 'amount', 'fee', 'tax', 'status', 'method', 'email']
-    # Ensure all columns exist before selecting (handles cases where fee/tax might be missing in old schemas)
     safe_display_cols = [col for col in display_cols if col in df.columns]
     
     # Rename created_at for better UI
     df_display = df[safe_display_cols].rename(columns={'created_at': 'Timestamp'})
     
+    # FIX: Replaced use_container_width=True with width="stretch"
     st.dataframe(
         df_display, 
-        use_container_width=True, 
+        width="stretch", 
         hide_index=True,
         column_config={
             "Timestamp": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm"),

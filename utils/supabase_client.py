@@ -1,13 +1,17 @@
-import os
+import streamlit as st
 from supabase import create_client, Client
-from dotenv import load_dotenv
 
-load_dotenv()
-
-url: str = os.environ.get("SUPABASE_URL")
-key: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") # Use Service Role for backend admin app
+# Fetch secrets using Streamlit's native secrets management
+try:
+    url: str = st.secrets["SUPABASE_URL"]
+    key: str = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+except KeyError:
+    st.error("Missing Supabase credentials in Streamlit secrets. Please check your configuration.")
+    st.stop()
 
 if not url or not key:
-    raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment variables.")
+    st.error("Supabase URL or Service Role Key is empty.")
+    st.stop()
 
+# Initialize Supabase Client
 supabase: Client = create_client(url, key)

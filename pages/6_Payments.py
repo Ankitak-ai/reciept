@@ -17,10 +17,24 @@ col1, col2 = st.columns([1, 3])
 
 with col1:
     if st.button("🔄 Sync Razorpay Payments", type="primary", width="stretch"):
-        with st.spinner("Triggering background sync... This may take a minute."):
+                with st.spinner("Triggering background sync... This may take a minute."):
             try:
-                # Call the Edge Function
-                response = requests.post(EDGE_FUNCTION_URL, timeout=300) # 5 min timeout
+                # FIX: Pass the Supabase Service Role Key to bypass the Edge Gateway JWT requirement
+                supabase_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+                headers = {
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                }
+                
+                response = requests.post(EDGE_FUNCTION_URL, headers=headers, timeout=300)
+                
+                # Add better error handling if the URL is wrong (404) or blocked (401)
+                if response.status_code != 200:
+                    st.error(f"Edge Function returned status {response.status_code}")
+                    with st.expander("🔍 Debug: Raw Response"):
+                        st.code(response.text)
+                    st.stop()
+
                 result = response.json()
                 
                 if result.get("success"):

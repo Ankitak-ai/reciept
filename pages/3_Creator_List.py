@@ -5,14 +5,12 @@ from utils.supabase_client import supabase
 st.set_page_config(page_title="Creator List", page_icon="📋")
 st.title("📋 Creator List")
 
-# Filters
 col1, col2 = st.columns(2)
 with col1:
     search_query = st.text_input("Search by Handle or Code")
 with col2:
     status_filter = st.selectbox("Filter by Status", ["ALL", "ACTIVE", "INACTIVE", "BLOCKED"])
 
-# Fetch Data
 query = supabase.table('creators').select('id, creator_handle, creator_code, email, status, created_at')
 if status_filter != "ALL":
     query = query.eq('status', status_filter)
@@ -31,7 +29,6 @@ else:
     if df.empty:
         st.warning("No creators match your search criteria.")
     else:
-        # Display actions
         for index, row in df.iterrows():
             cols = st.columns([2, 2, 2, 1, 1, 1])
             cols[0].write(f"**{row['creator_handle']}**")
@@ -40,6 +37,7 @@ else:
             
             if cols[3].button("View", key=f"view_{row['id']}"):
                 st.session_state['selected_creator_id'] = row['id']
+                st.session_state['edit_mode'] = False
                 st.switch_page("pages/4_Creator_Details.py")
                 
             if cols[4].button("Edit", key=f"edit_{row['id']}"):

@@ -2,15 +2,10 @@ import streamlit as st
 import pandas as pd
 import datetime
 from utils.supabase_client import supabase
+from utils.helpers import format_inr, to_ist, IST
 
 st.set_page_config(page_title="Payout Management", page_icon="💰", layout="wide")
 st.title("💰 Payout Generation & Reconciliation")
-
-# Helper function for currency formatting
-def format_inr(val):
-    if val is None or val == 0: return "₹0.00"
-    try: return f"₹{float(val)/100:.2f}"
-    except (ValueError, TypeError): return "₹0.00"
 
 # ==============================================================================
 # TABS SETUP
@@ -21,7 +16,7 @@ tab_generate, tab_history = st.tabs(["🚀 Generate New Payout", "📜 Payout Hi
 # TAB 1: GENERATE NEW PAYOUT
 # ==============================================================================
 with tab_generate:
-    st.markdown("### 📅 Select Payout Cycle")
+    st.markdown("### 📅 Select Payout Cycle (All dates calculated in IST)")
     col1, col2, col3 = st.columns(3)
     
     # Default to last month
@@ -35,7 +30,6 @@ with tab_generate:
     with col2:
         end_date = st.date_input("Cycle End Date", value=default_end)
     with col3:
-        # Fetch creators for dropdown
         creators_res = supabase.table('creators').select('id, creator_handle, creator_code, payout_rate').eq('status', 'ACTIVE').order('creator_handle').execute()
         creators_list = creators_res.data or []
         
@@ -46,24 +40,31 @@ with tab_generate:
         selected_creator_label = st.selectbox("Select Creator", options=list(creator_options.keys()))
         selected_creator_id = creator_options[selected_creator_label]
 
-    # Convert dates to ISO strings for Supabase (End date needs to include the whole day)
-    start_iso = f"{start_date}T00:00:00+00:00"
-    end_iso = f"{end_date}T23:59:59+00:00"
+    # ==============================================================================
+    # CRITICAL FIX: IST BOUNDARY CALCULATION
+    # ==============================================================================
+    # 1. Combine the selected date with IST start/end of day
+    start_dt_ist = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=IST)
+    end_dt_ist = datetime.datetime.combine(end_date, datetime.time.max, tzinfo=IST)
+    
+    # 2. Convert those exact IST moments to UTC for the Supabase query
+    start_iso = start_dt_ist.astimezone(datetime.timezone.utc).isoformat()
+    end_iso = end_dt_ist.astimezone(datetime.timezone.utc).isoformat()
+    
+    st.caption(f"🕒 Querying from: `{to_ist(start_iso)}` to `{to_ist(end_iso)}`")
 
     # --- PREVIEW LOGIC ---
     if st.button("🔍 Preview Payout Calculation", type="secondary", width="stretch"):
         with st.spinner("Calculating unsettled payments and refunds..."):
             
             preview_data = []
-            
-            # Determine which creators to process
             target_creators = creators_list if selected_creator_id == "ALL" else [next(c for c in creators_list if c['id'] == selected_creator_id)]
             
             for creator in target_creators:
                 cid = creator['id']
                 rate = float(creator.get('payout_rate', 89.0))
                 
-                # 1. Fetch UNSETTLED payments for this cycle
+                # Fetch UNSETTLED payments within the exact IST boundaries
                 payments_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr')\
                     .eq('creator_id', cid)\
                     .eq('is_settled', False)\
@@ -71,13 +72,13 @@ with tab_generate:
                     .lte('created_at', end_iso).execute()
                 
                 payments = payments_res.data or []
-                if not payments: continue # Skip creators with 0 activity
+                if not payments: continue 
                 
                 gross = sum(p.get('amount_inr', 0) or 0 for p in payments)
                 fees = sum(p.get('fee_inr', 0) or 0 for p in payments)
                 tax = sum(p.get('tax_inr', 0) or 0 for p in payments)
                 
-                # 2. Fetch refunds for this cycle (deducted from current cycle regardless of original payment date)
+                # Fetch refunds within the exact IST boundaries
                 refunds_res = supabase.table('refunds').select('amount_inr')\
                     .eq('creator_id', cid)\
                     .gte('created_at', start_iso)\
@@ -86,7 +87,7 @@ with tab_generate:
                 refunds = refunds_res.data or []
                 total_refunded = sum(r.get('amount_inr', 0) or 0 for r in refunds)
                 
-                # 3. Calculate Final Math
+                # Calculate Final Math
                 net_base = gross - fees - tax
                 final_net = net_base - total_refunded
                 creator_share = round(final_net * (rate / 100))
@@ -103,7 +104,6 @@ with tab_generate:
                     "Net Base (INR)": format_inr(net_base),
                     "Creator Payout (INR)": format_inr(creator_share),
                     "Platform Cut (INR)": format_inr(platform_comm),
-                    # Store raw integers for the commit phase
                     "_gross": gross, "_fees": fees, "_tax": tax, "_refunded": total_refunded,
                     "_net_base": net_base, "_final_net": final_net, 
                     "_creator_share": creator_share, "_platform_comm": platform_comm,
@@ -111,7 +111,7 @@ with tab_generate:
                 })
             
             if not preview_data:
-                st.warning("📭 No unsettled payments found for the selected criteria.")
+                st.warning("📭 No unsettled payments found for the selected IST date range.")
                 st.session_state.pop('payout_preview', None)
             else:
                 st.session_state['payout_preview'] = preview_data
@@ -121,15 +121,12 @@ with tab_generate:
     if 'payout_preview' in st.session_state and st.session_state['payout_preview']:
         st.markdown("---")
         st.markdown("### 📊 Payout Preview")
-        st.info("⚠️ **Warning:** Clicking 'Generate & Lock Payouts' will permanently mark these transactions as settled. They will not be included in future payout cycles.")
+        st.info("⚠️ **Warning:** Clicking 'Generate & Lock Payouts' will permanently mark these transactions as settled.")
         
         df_preview = pd.DataFrame(st.session_state['payout_preview'])
-        
-        # Display clean dataframe (drop hidden raw columns)
         display_cols = [c for c in df_preview.columns if not c.startswith('_')]
         st.dataframe(df_preview[display_cols], width="stretch", hide_index=True)
         
-        # Total Summary
         total_payout_out = sum(row['_creator_share'] for row in st.session_state['payout_preview'])
         total_platform_in = sum(row['_platform_comm'] for row in st.session_state['payout_preview'])
         
@@ -191,7 +188,6 @@ with tab_generate:
 with tab_history:
     st.markdown("### 📜 Generated Payouts Ledger")
     
-    # Fetch all payouts with creator details
     payouts_res = supabase.table('payouts').select(
         '*, creators:creator_id(creator_handle, creator_code)'
     ).order('created_at', desc=True).execute()
@@ -201,7 +197,6 @@ with tab_history:
     else:
         df_payouts = pd.DataFrame(payouts_res.data)
         
-        # Format Data
         df_payouts['Creator'] = df_payouts['creators'].apply(lambda x: x['creator_handle'] if x else 'Unknown')
         df_payouts['Code'] = df_payouts['creators'].apply(lambda x: x['creator_code'] if x else 'Unknown')
         df_payouts['Gross'] = df_payouts['gross_amount_inr'].apply(format_inr)
@@ -210,16 +205,13 @@ with tab_history:
         df_payouts['Net Payout'] = df_payouts['creator_share_inr'].apply(format_inr)
         df_payouts['Platform Cut'] = df_payouts['platform_commission_inr'].apply(format_inr)
         
-        # Display Table
+        # Use the helper to format timestamps into readable IST strings
+        df_payouts['Generated On'] = df_payouts['created_at'].apply(to_ist)
+        
         display_payouts = df_payouts[[
-            'created_at', 'Creator', 'Code', 'cycle_start_date', 'cycle_end_date', 
+            'Generated On', 'Creator', 'Code', 'cycle_start_date', 'cycle_end_date', 
             'status', 'Gross', 'Fees', 'Refunds', 'Net Payout', 'Platform Cut', 'transaction_ref'
-        ]].rename(columns={
-            'created_at': 'Generated On',
-            'cycle_start_date': 'Cycle Start',
-            'cycle_end_date': 'Cycle End',
-            'transaction_ref': 'Bank UTR / Ref'
-        })
+        ]]
         
         st.dataframe(display_payouts, width="stretch", hide_index=True)
         
@@ -227,9 +219,8 @@ with tab_history:
         
         # --- UPDATE PAYOUT STATUS (RECONCILIATION) ---
         st.markdown("### 🏦 Mark Payout as PAID")
-        st.caption("Once the bank transfer is complete, update the status and enter the transaction reference for audit purposes.")
+        st.caption("Once the bank transfer is complete, update the status and enter the transaction reference.")
         
-        # Create a clean list for the dropdown
         pending_payouts = df_payouts[df_payouts['status'] != 'PAID']
         
         if pending_payouts.empty:
@@ -246,8 +237,8 @@ with tab_history:
                     selected_payout_label = st.selectbox("Select Payout to Mark as Paid", options=list(payout_options.keys()))
                     utr_ref = st.text_input("Bank UTR / Transaction Reference", placeholder="e.g., UTTR123456789")
                 with col_b:
-                    st.write("") # Spacing
-                    st.write("") # Spacing
+                    st.write("") 
+                    st.write("") 
                     submitted_paid = st.form_submit_button("Mark as PAID", type="primary", width="stretch")
                 
                 if submitted_paid:

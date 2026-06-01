@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 from utils.supabase_client import supabase
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Currency Settings", page_icon="💱")
 st.title("💱 Currency Conversion Settings")
 

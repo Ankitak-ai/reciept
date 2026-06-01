@@ -1,15 +1,10 @@
 import requests
 import streamlit as st
 import time
-import datetime # <-- ADDED: Required for timestamp conversion
+import datetime
 from utils.supabase_client import supabase
 
 def sync_razorpay_payments():
-    """
-    Fetches payments from Razorpay, matches them to creators via receipt prefix,
-    and stores them in the Supabase database with raw JSONB payloads.
-    """
-    # 1. Fetch credentials strictly from Streamlit Secrets
     try:
         key_id = st.secrets["RAZORPAY_KEY_ID"]
         key_secret = st.secrets["RAZORPAY_KEY_SECRET"]
@@ -17,31 +12,77 @@ def sync_razorpay_payments():
         st.error("⚠️ Missing RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET in Streamlit Secrets.")
         return None, None, None
     
-    # 2. Initialize metrics tracking
     metrics = {"fetched": 0, "inserted": 0, "duplicate": 0, "unmapped": 0, "errors": 0}
     unmapped_receipts = []
     error_logs = []
 
-    # 3. Fetch all creators into a map for O(1) lookup by creator_code
     creators_res = supabase.table('creators').select('id, creator_code').execute()
     creators_map = {c['creator_code']: c['id'] for c in creators_res.data}
 
     try:
-        # 4. Fetch payments from Razorpay API (fetching last 100 for this sync batch)
-        response = requests.get(
-            "https://api.razorpay.com/v1/payments?count=100",
-            auth=(key_id, key_secret),
-            timeout=15
-        )
-        response.raise_for_status()
-        payments_data = response.json().get("items", [])
-        metrics["fetched"] = len(payments_data)
+        # ==========================================
+        # 1. ROBUST PAGINATION LOGIC (Fetch ALL payments)
+        # ==========================================
+        skip = 0
+        count = 100
+        to_timestamp = None
+        all_payments = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Fetching payments from Razorpay...")
 
-        for payment in payments_data:
+        while True:
+            url = f"https://api.razorpay.com/v1/payments?count={count}"
+            
+            # Use time-based pagination after 1000 records to avoid Razorpay's skip limit
+            if to_timestamp:
+                url += f"&to={to_timestamp}"
+            else:
+                url += f"&skip={skip}"
+                
+            response = requests.get(url, auth=(key_id, key_secret), timeout=15)
+            response.raise_for_status()
+            payments_data = response.json().get("items", [])
+            
+            if not payments_data:
+                break
+                
+            all_payments.extend(payments_data)
+            metrics["fetched"] = len(all_payments)
+            status_text.text(f"Fetched {metrics['fetched']} payments...")
+            
+            if len(payments_data) < count:
+                break
+                
+            if to_timestamp:
+                new_to = payments_data[-1]['created_at']
+                # Infinite loop guard: If the oldest timestamp in this batch is identical 
+                # to the previous batch, we've hit Razorpay's 1-second resolution limit.
+                if new_to == to_timestamp:
+                    st.warning(f"⚠️ Reached Razorpay's time-based pagination limit at timestamp {to_timestamp}. Over 100 payments occurred in the exact same second. Older payments beyond this point could not be fetched.")
+                    break
+                to_timestamp = new_to
+            else:
+                skip += count
+                if skip >= 1000:
+                    # Switch to time-based pagination to bypass Razorpay's 1000 skip limit
+                    to_timestamp = payments_data[-1]['created_at']
+                    skip = 0
+
+            time.sleep(0.2) # Respect Razorpay rate limits
+
+        progress_bar.empty()
+        status_text.text(f"Processing {len(all_payments)} payments...")
+
+        # ==========================================
+        # 2. PROCESS AND INSERT PAYMENTS
+        # ==========================================
+        for idx, payment in enumerate(all_payments):
             payment_id = payment.get("id")
             order_id = payment.get("order_id")
             
-            # 5. Duplicate Check
+            # Duplicate Check (Also handles overlapping time-based pagination batches)
             existing = supabase.table('payments').select('id').eq('payment_id', payment_id).execute()
             if existing.data:
                 metrics["duplicate"] += 1
@@ -50,11 +91,9 @@ def sync_razorpay_payments():
             raw_order_payload = None
             creator_id = None
 
-            # 6. Fetch order details if order_id exists
             if order_id:
                 try:
-                    # Rate limit handling: small delay to respect Razorpay limits (100ms)
-                    time.sleep(0.1) 
+                    time.sleep(0.05) # Micro-delay for order fetches
                     
                     order_response = requests.get(
                         f"https://api.razorpay.com/v1/orders/{order_id}",
@@ -67,7 +106,6 @@ def sync_razorpay_payments():
                         raw_order_payload = order_data
                         receipt = order_data.get("receipt", "")
                         
-                        # 7. Parse creator_code from receipt (e.g., "mc_rp_carryminati" -> matches "mc")
                         if receipt:
                             for code, cid in creators_map.items():
                                 if receipt.startswith(f"{code}_"):
@@ -79,18 +117,14 @@ def sync_razorpay_payments():
                                 unmapped_receipts.append({"payment_id": payment_id, "receipt": receipt})
                     else:
                         metrics["errors"] += 1
-                        error_logs.append(f"Invalid order ID {order_id}: {order_response.status_code} - {order_response.text}")
+                        error_logs.append(f"Invalid order ID {order_id}: {order_response.status_code}")
                         
                 except requests.exceptions.RequestException as e:
                     metrics["errors"] += 1
                     error_logs.append(f"Order fetch failed for {order_id}: {str(e)}")
 
-            # 8. Insert payment into database
             try:
-                # ==========================================
-                # FIX: Convert Razorpay Unix timestamp (integer) 
-                # to ISO 8601 string for PostgreSQL TIMESTAMPTZ
-                # ==========================================
+                # Convert Razorpay Unix timestamp to ISO 8601 string for PostgreSQL
                 created_at_ts = payment.get("created_at")
                 created_at_formatted = None
                 if created_at_ts:
@@ -111,7 +145,7 @@ def sync_razorpay_payments():
                     "method": payment.get("method"),
                     "email": payment.get("email"),
                     "contact": payment.get("contact"),
-                    "created_at": created_at_formatted, # <-- FIX APPLIED HERE
+                    "created_at": created_at_formatted,
                     "raw_payment_payload": payment,
                     "raw_order_payload": raw_order_payload
                 }
@@ -122,7 +156,12 @@ def sync_razorpay_payments():
             except Exception as e:
                 metrics["errors"] += 1
                 error_logs.append(f"DB Insert failed for {payment_id}: {str(e)}")
+                
+            # Update progress bar during insertion
+            if idx % 20 == 0:
+                progress_bar.progress((idx + 1) / len(all_payments))
 
+        progress_bar.empty()
         return metrics, unmapped_receipts, error_logs
 
     except requests.exceptions.RequestException as e:

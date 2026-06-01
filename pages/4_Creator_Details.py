@@ -3,6 +3,9 @@ import pandas as pd
 from utils.supabase_client import supabase
 from utils.validators import validate_pan
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Creator Details", page_icon="👤", layout="wide")
 st.title("👤 Creator Details")
 

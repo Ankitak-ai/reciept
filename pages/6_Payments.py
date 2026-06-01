@@ -8,7 +8,7 @@ st.title("💳 Razorpay Payment Sync & Management")
 
 # ⚠️ IMPORTANT: Replace this with your actual Edge Function URL 
 # (Found in Supabase Dashboard -> Edge Functions -> sync-razorpay -> Invoke URL)
-EDGE_FUNCTION_URL = "https://YOUR_PROJECT_ID.supabase.co/functions/v1/sync-razorpay"
+EDGE_FUNCTION_URL = "https://ewbaqylcvdmbigtjarow.supabase.co/functions/v1/sync-razorpay"
 
 # ==============================================================================
 # 1. SYNC CONTROLS (Triggering the Edge Function)

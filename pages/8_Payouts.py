@@ -4,6 +4,9 @@ import datetime
 from utils.supabase_client import supabase
 from utils.helpers import format_inr, to_ist, IST
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Payout Management", page_icon="💰", layout="wide")
 st.title("💰 Payout Generation & Reconciliation")
 

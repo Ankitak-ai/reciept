@@ -2,6 +2,9 @@ import streamlit as st
 from utils.supabase_client import supabase
 from utils.validators import validate_pan
 
+from utils.auth import require_auth
+require_auth()
+
 st.set_page_config(page_title="Add Creator", page_icon="➕")
 st.title("➕ Add New Creator")
 

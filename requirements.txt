@@ -3,3 +3,6 @@ supabase
 pandas
 python-dotenv
 requests
+reportlab==4.2.2
+qrcode[pil]==7.4.2
+num2words==0.5.13

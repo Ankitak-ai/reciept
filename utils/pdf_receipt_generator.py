@@ -12,7 +12,6 @@ from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle, Paragraph,
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 import qrcode
 import streamlit as st
-from supabase import create_client
 
 # ==============================================================================
 # 1. HELPERS
@@ -26,7 +25,6 @@ def get_amount_in_words(amount_cents):
     """Converts paise to Indian Rupees in words."""
     rupees = float(amount_cents) / 100
     try:
-        # en_IN handles Lakhs/Crores correctly
         words = num2words(int(rupees), lang='en_IN').replace('rupee', 'Rupee').replace('rupees', 'Rupees')
         paise = int(round((rupees - int(rupees)) * 100))
         if paise > 0:
@@ -71,7 +69,6 @@ def build_receipt_pdf(payout, creator, company, receipt_number, receipt_hash):
     styles.add(ParagraphStyle(name='DocTitle', parent=styles['Title'], fontSize=20, textColor=colors.HexColor('#1A202C'), spaceAfter=6))
     styles.add(ParagraphStyle(name='SectionHeader', parent=styles['Heading2'], fontSize=11, textColor=colors.HexColor('#2D3748'), spaceAfter=4, borderWidth=1, borderColor=colors.HexColor('#CBD5E0'), borderPadding=4))
     styles.add(ParagraphStyle(name='SmallText', parent=styles['Normal'], fontSize=8, textColor=colors.HexColor('#4A5568')))
-    styles.add(ParagraphStyle(name='TableHeader', parent=styles['Normal'], fontSize=9, textColor=colors.white, fontName='Helvetica-Bold'))
     styles.add(ParagraphStyle(name='TableCell', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#2D3748')))
     styles.add(ParagraphStyle(name='Disclaimer', parent=styles['Normal'], fontSize=7, textColor=colors.HexColor('#718096'), alignment=TA_CENTER))
 
@@ -79,9 +76,9 @@ def build_receipt_pdf(payout, creator, company, receipt_number, receipt_hash):
 
     # --- HEADER ---
     header_data = [
-        [Paragraph(f"<b>{company['legal_name']}</b>", styles['Normal']), 
+        [Paragraph(f"<b>{company.get('legal_name', 'STREAMHEART PRIVATE LIMITED')}</b>", styles['Normal']), 
          Paragraph("<b>PAYOUT RECEIPT</b>", styles['DocTitle'])],
-        [Paragraph(company['address'], styles['SmallText']), 
+        [Paragraph(company.get('address', ''), styles['SmallText']), 
          Paragraph(f"Receipt No: {receipt_number}", styles['SectionHeader'])]
     ]
     header_table = Table(header_data, colWidths=[320, 180])
@@ -91,7 +88,15 @@ def build_receipt_pdf(payout, creator, company, receipt_number, receipt_hash):
 
     # --- CREATOR DETAILS ---
     story.append(Paragraph("CREATOR DETAILS", styles['SectionHeader']))
-    fin_info = creator.get('financial_info', {})
+    
+    # FIX: Safely extract financial_info whether it's a list or a dict
+    fin_info_raw = creator.get('financial_info', [])
+    if isinstance(fin_info_raw, list) and len(fin_info_raw) > 0:
+        fin_info = fin_info_raw[0]
+    elif isinstance(fin_info_raw, dict):
+        fin_info = fin_info_raw
+    else:
+        fin_info = {}
     
     creator_data = [
         ["Full Name:", fin_info.get('legal_name', creator.get('creator_handle', 'N/A')), "Creator ID:", creator.get('creator_code', 'N/A')],
@@ -119,10 +124,10 @@ def build_receipt_pdf(payout, creator, company, receipt_number, receipt_hash):
     # --- PAYOUT BREAKDOWN ---
     story.append(Paragraph("PAYOUT & TAX BREAKDOWN", styles['SectionHeader']))
     
-    gross = payout['gross_amount_inr']
-    platform_fee = payout['platform_commission_inr']
-    refunds = payout['refunds_deducted_inr']
-    net = payout['creator_share_inr']
+    gross = payout.get('gross_amount_inr', 0)
+    platform_fee = payout.get('platform_commission_inr', 0)
+    refunds = payout.get('refunds_deducted_inr', 0)
+    net = payout.get('creator_share_inr', 0)
     
     breakdown_data = [
         ["Description", "Amount (INR)"],

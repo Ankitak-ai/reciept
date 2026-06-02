@@ -85,7 +85,7 @@ with tab_pl:
             hole=0.4,
             color_discrete_sequence=px.colors.sequential.Blues_r
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 # --- TAB 2: EXPENSES ---
 with tab_exp:
@@ -103,7 +103,7 @@ with tab_exp:
             
         description = st.text_input("Description / Notes", placeholder="e.g., AWS Monthly Bill, Supabase Pro Plan, CA Retainer")
         
-        submitted = st.form_submit_button("➕ Add Expense", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("➕ Add Expense", type="primary", width="stretch")
         
         if submitted:
             if amount_rupees <= 0:
@@ -130,19 +130,15 @@ with tab_exp:
         df_exp['Amount (₹)'] = df_exp['amount_inr'].apply(lambda x: f"₹{x/100:,.2f}")
         df_exp['Date'] = pd.to_datetime(df_exp['expense_date']).dt.strftime('%d %b %Y')
         
-        # ✅ FIX: Include 'id' in the dataframe so we can map it for deletion later
         display_exp = df_exp[['id', 'Date', 'category', 'description', 'Amount (₹)']].rename(columns={
             'category': 'Category',
             'description': 'Description'
         })
         
-        # Display the table, but drop the 'id' column so it doesn't show in the UI
-        st.dataframe(display_exp.drop(columns=['id']), use_container_width=True, hide_index=True)
+        st.dataframe(display_exp.drop(columns=['id']), width="stretch", hide_index=True)
         
-        # Delete functionality
         st.markdown("##### 🗑️ Remove Incorrect Expense")
         
-        # Now row['id'] will work perfectly because we kept it in display_exp
         exp_options = {
             f"{row['Date']} | {row['Category']} | {row['Amount (₹)']} | {row['Description']}": row['id'] 
             for _, row in display_exp.iterrows()
@@ -154,7 +150,7 @@ with tab_exp:
         with col_del2:
             st.write("")
             st.write("")
-            if st.button("Delete", type="secondary", use_container_width=True):
+            if st.button("Delete", type="secondary", width="stretch"):
                 exp_id = exp_options[selected_exp]
                 supabase.table('expenses').delete().eq('id', exp_id).execute()
                 st.success("Deleted!")
@@ -214,7 +210,7 @@ with tab_export:
     }
     
     df_export = pd.DataFrame(export_data)
-    st.dataframe(df_export, use_container_width=True, hide_index=True)
+    st.dataframe(df_export, width="stretch", hide_index=True)
     
     csv = df_export.to_csv(index=False).encode('utf-8')
     st.download_button(
@@ -222,5 +218,5 @@ with tab_export:
         data=csv,
         file_name=f"streamheart_financials_{datetime.date.today().isoformat()}.csv",
         mime="text/csv",
-        use_container_width=True
+        width="stretch"
     )

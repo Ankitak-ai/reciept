@@ -11,7 +11,7 @@ require_auth()
 st.set_page_config(page_title="Payout Receipts", page_icon="", layout="wide")
 st.title(" Payout Receipt Generation")
 
-# Debug: Check dependencies
+# Fetch dependencies
 try:
     from utils.pdf_receipt_generator import (
         build_receipt_pdf, upload_receipt_to_supabase, 
@@ -21,13 +21,11 @@ try:
 except Exception as e:
     IMPORT_SUCCESS = False
     st.error(f"❌ Failed to import PDF generator: {e}")
-    st.code(traceback.format_exc())
 
 # Fetch Company Details
 try:
     company_res = supabase.table('company_settings').select('setting_key', 'setting_value').execute()
     company = {row['setting_key']: row['setting_value'] for row in company_res.data}
-    st.success(f"✅ Loaded {len(company)} company settings")
 except Exception as e:
     st.error(f"❌ Failed to load company settings: {e}")
     company = {}
@@ -40,24 +38,17 @@ tab_generate, tab_ledger = st.tabs(["🚀 Generate Receipts", "📜 Receipt Ledg
 with tab_generate:
     st.markdown("###  Generate Receipts for Paid Payouts")
     
-    # Fetch paid payouts
     try:
+        # FIX: Added 'id' to the creators select list so creator['id'] is available
         payouts_res = supabase.table('payouts').select(
-            '*, creators:creator_id(creator_handle, creator_code, email, phone_number, financial_info:creator_financial_info(*))'
+            '*, creators:creator_id(id, creator_handle, creator_code, email, phone_number, financial_info:creator_financial_info(*))'
         ).eq('status', 'PAID').order('created_at', desc=True).execute()
         
         paid_payouts = payouts_res.data or []
-        st.info(f"Found {len(paid_payouts)} payouts with status 'PAID'")
         
         if not paid_payouts:
             st.warning("No paid payouts found. Go to Payouts page and mark a payout as PAID first.")
         else:
-            # Show the paid payouts
-            st.write("### Paid Payouts Available:")
-            for p in paid_payouts[:5]:  # Show first 5
-                creator_name = p['creators']['creator_handle'] if p.get('creators') else 'Unknown'
-                st.write(f"- {creator_name}: ₹{p['creator_share_inr']/100:.2f}")
-            
             # Check for existing receipts
             existing_receipts_res = supabase.table('payout_receipts').select('payout_id').execute()
             existing_payout_ids = [r['payout_id'] for r in existing_receipts_res.data] if existing_receipts_res.data else []
@@ -71,7 +62,7 @@ with tab_generate:
                 
                 if st.button("📄 Generate All Pending Receipts", type="primary", use_container_width=True):
                     if not IMPORT_SUCCESS:
-                        st.error("Cannot generate receipts: PDF generator failed to import. Check logs.")
+                        st.error("Cannot generate receipts: PDF generator failed to import.")
                     else:
                         progress_bar = st.progress(0)
                         status_text = st.empty()
@@ -89,21 +80,18 @@ with tab_generate:
                                 receipt_hash = generate_receipt_hash(receipt_number, payout['id'], creator['id'], payout['creator_share_inr'])
                                 
                                 # 2. Build PDF
-                                status_text.text(f"Building PDF for {creator_name}...")
                                 pdf_bytes = build_receipt_pdf(payout, creator, company, receipt_number, receipt_hash)
                                 
                                 if not pdf_bytes:
                                     raise Exception("PDF bytes are empty")
                                 
                                 # 3. Upload to Storage
-                                status_text.text(f"Uploading PDF for {creator_name}...")
                                 pdf_url = upload_receipt_to_supabase(supabase, pdf_bytes, receipt_number)
                                 
                                 if not pdf_url:
                                     raise Exception("PDF URL is empty")
                                 
                                 # 4. Save to Database
-                                status_text.text(f"Saving receipt for {creator_name}...")
                                 supabase.table('payout_receipts').insert({
                                     "receipt_number": receipt_number,
                                     "payout_id": payout['id'],
@@ -121,7 +109,6 @@ with tab_generate:
                                 error_msg = f"Failed for {creator_name}: {str(e)}"
                                 error_log.append(error_msg)
                                 st.error(error_msg)
-                                st.code(traceback.format_exc())
                             
                             progress_bar.progress((idx + 1) / len(pending_payouts))
                         
@@ -130,11 +117,9 @@ with tab_generate:
                         
                         if success_count > 0:
                             st.success(f"✅ Successfully generated {success_count} receipts!")
-                        if error_log:
-                            st.error(f"❌ {len(error_log)} receipts failed to generate. Check errors above.")
-                        
-                        if success_count > 0:
                             st.rerun()
+                        if error_log:
+                            st.error(f"❌ {len(error_log)} receipts failed. Check logs.")
                             
     except Exception as e:
         st.error(f"❌ Failed to fetch payouts: {e}")
@@ -157,7 +142,7 @@ with tab_ledger:
             df_receipts = pd.DataFrame(receipts_res.data)
             df_receipts['Creator'] = df_receipts['creators'].apply(lambda x: x['creator_handle'] if x else 'Unknown')
             df_receipts['Gross'] = df_receipts['gross_amount'].apply(lambda x: f"₹{x/100:.2f}" if x else "₹0.00")
-            df_receipts['Net Payout'] = df_receipts['net_amount'].apply(lambda x: f"₹{x/100:.2f}" if x else "₹0.00")
+            df_receipts['Net Payout'] = df_receipts['net_amount'].apply(lambda x: f"{x/100:.2f}" if x else "₹0.00")
             
             st.dataframe(df_receipts[['generated_at', 'receipt_number', 'Creator', 'Gross', 'Net Payout']], 
                         use_container_width=True, hide_index=True)

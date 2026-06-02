@@ -37,7 +37,7 @@ total_platform_commission = sum(p.get('platform_commission_inr', 0) or 0 for p i
 net_revenue = total_gmv - total_refunds
 operating_profit = total_platform_commission - total_gateway_fees
 
-# NEW: Expense Calculations
+# Expense Calculations
 total_expenses = sum(e.get('amount_inr', 0) or 0 for e in expenses)
 final_net_profit = operating_profit - total_expenses
 
@@ -130,15 +130,23 @@ with tab_exp:
         df_exp['Amount (₹)'] = df_exp['amount_inr'].apply(lambda x: f"₹{x/100:,.2f}")
         df_exp['Date'] = pd.to_datetime(df_exp['expense_date']).dt.strftime('%d %b %Y')
         
-        display_exp = df_exp[['Date', 'category', 'description', 'Amount (₹)']].rename(columns={
+        # ✅ FIX: Include 'id' in the dataframe so we can map it for deletion later
+        display_exp = df_exp[['id', 'Date', 'category', 'description', 'Amount (₹)']].rename(columns={
             'category': 'Category',
             'description': 'Description'
         })
-        st.dataframe(display_exp, use_container_width=True, hide_index=True)
+        
+        # Display the table, but drop the 'id' column so it doesn't show in the UI
+        st.dataframe(display_exp.drop(columns=['id']), use_container_width=True, hide_index=True)
         
         # Delete functionality
         st.markdown("##### 🗑️ Remove Incorrect Expense")
-        exp_options = {f"{row['Date']} | {row['Category']} | {row['Amount (₹)']} | {row['Description']}": row['id'] for _, row in display_exp.iterrows()}
+        
+        # Now row['id'] will work perfectly because we kept it in display_exp
+        exp_options = {
+            f"{row['Date']} | {row['Category']} | {row['Amount (₹)']} | {row['Description']}": row['id'] 
+            for _, row in display_exp.iterrows()
+        }
         
         col_del1, col_del2 = st.columns([3, 1])
         with col_del1:

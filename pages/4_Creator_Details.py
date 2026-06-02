@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 from utils.supabase_client import supabase
+from utils.auth import require_auth
 from utils.validators import validate_pan
 
-from utils.auth import require_auth
+# 🔒 Require authentication for this page
 require_auth()
 
 st.set_page_config(page_title="Creator Details", page_icon="👤", layout="wide")
@@ -16,13 +17,21 @@ if 'selected_creator_id' not in st.session_state:
 creator_id = st.session_state['selected_creator_id']
 edit_mode = st.session_state.get('edit_mode', False)
 
+# 1. Fetch Core Profile Data
 creator = supabase.table('creators').select('*').eq('id', creator_id).execute().data[0]
 financial = supabase.table('creator_financial_info').select('*').eq('creator_id', creator_id).execute()
 fin_data = financial.data[0] if financial.data else {}
 
+# 2. Fetch LIFETIME AGGREGATES for accurate Summary Metrics
 all_payments = supabase.table('payments').select('amount_inr, fee_inr, tax_inr').eq('creator_id', creator_id).execute().data or []
 all_refunds = supabase.table('refunds').select('amount_inr').eq('creator_id', creator_id).execute().data or []
 
+total_gross = sum(p.get('amount_inr', 0) or 0 for p in all_payments)
+total_fees = sum(p.get('fee_inr', 0) or 0 for p in all_payments)
+total_tax = sum(p.get('tax_inr', 0) or 0 for p in all_payments)
+total_refunded = sum(r.get('amount_inr', 0) or 0 for r in all_refunds)
+
+# 3. Fetch LEDGER DATA (Last 50 only) for the UI tables
 payments_res = supabase.table('payments').select(
     'payment_id, order_id, amount_inr, fee_inr, tax_inr, status, method, created_at, original_currency, original_amount'
 ).eq('creator_id', creator_id).order('created_at', desc=True).limit(50).execute()
@@ -34,13 +43,17 @@ refunds_res = supabase.table('refunds').select(
 st.subheader(f"{creator['creator_handle']} ({creator['status']})")
 
 def format_inr(val):
-    if val is None: return "₹0.00"
+    if val is None: return "0.00"
     try: return f"₹{float(val)/100:.2f}"
     except (ValueError, TypeError): return "₹0.00"
 
+# ==============================================================================
+# VIEW MODE (Tabs)
+# ==============================================================================
 if not edit_mode:
     tab_profile, tab_ledger = st.tabs(["👤 Profile & Financials", "💳 Payments & Refunds"])
     
+    # --- TAB 1: PROFILE ---
     with tab_profile:
         col1, col2 = st.columns(2)
         with col1:
@@ -56,20 +69,16 @@ if not edit_mode:
             st.write(f"**PAN:** {fin_data.get('pan_number') or 'N/A'}")
             st.write(f"**UPI:** {fin_data.get('upi_id') or 'N/A'}")
             st.write(f"**Bank:** {fin_data.get('bank_name') or 'N/A'}")
-            st.write(f"**Account (Last 4):** {fin_data.get('account_number_last4') or 'N/A'}")
+            st.write(f"**Account (Last 4):** {fin_data.get('account_last4') or 'N/A'}")
             st.write(f"**IFSC:** {fin_data.get('ifsc') or 'N/A'}")
 
-        if st.button("Back to List"):
-            st.session_state['edit_mode'] = False
-            st.switch_page("pages/3_Creator_List.py")
+        if st.button("✏️ Edit Profile"):
+            st.session_state['edit_mode'] = True
+            st.rerun()
 
+    # --- TAB 2: PAYMENTS & REFUNDS ---
     with tab_ledger:
-        total_gross = sum(p.get('amount_inr', 0) or 0 for p in all_payments)
-        total_fees = sum(p.get('fee_inr', 0) or 0 for p in all_payments)
-        total_tax = sum(p.get('tax_inr', 0) or 0 for p in all_payments)
-        total_refunded = sum(r.get('amount_inr', 0) or 0 for r in all_refunds)
-        
-        # GROSS-BASED MATH
+        # Calculate derived metrics based on LIFETIME totals (Gross-Based Model)
         adjusted_gross = total_gross - total_refunded
         payout_rate = float(creator.get('payout_rate', 89))
         creator_share = round(adjusted_gross * (payout_rate / 100))
@@ -87,6 +96,7 @@ if not edit_mode:
 
         st.divider()
 
+        # 1. Payments Dataframe
         st.markdown("### 💸 Recent Payments (Last 50)")
         payments_data = payments_res.data or []
         if not payments_data:
@@ -103,6 +113,7 @@ if not edit_mode:
 
         st.divider()
 
+        # 2. Refunds Dataframe
         st.markdown("### ↩️ Recent Refunds (Last 50)")
         refunds_data = refunds_res.data or []
         if not refunds_data:
@@ -113,9 +124,14 @@ if not edit_mode:
             display_refunds = df_refunds[['created_at', 'refund_id', 'payment_id', 'Deducted (INR)', 'status']].rename(columns={'created_at': 'Date'})
             st.dataframe(display_refunds, width="stretch", hide_index=True, column_config={"Date": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm")})
 
+# ==============================================================================
+# EDIT MODE
+# ==============================================================================
 else:
-    st.markdown("### ✏️ Edit Creator")
-    def safe_str(val): return str(val) if val is not None else ''
+    st.markdown("### ✏️ Edit Creator Profile & Financials")
+    
+    def safe_str(val):
+        return str(val) if val is not None else ''
 
     with st.form("edit_form"):
         c_email = st.text_input("Email", value=safe_str(creator.get('email')))
@@ -131,17 +147,53 @@ else:
         f_upi = st.text_input("UPI ID", value=safe_str(fin_data.get('upi_id')))
         f_bank = st.text_input("Bank Name", value=safe_str(fin_data.get('bank_name')))
         f_holder = st.text_input("Account Holder", value=safe_str(fin_data.get('account_holder_name')))
-        f_acc = st.text_input("Acc Last 4", value=safe_str(fin_data.get('account_number_last4')))
+        f_acc = st.text_input("Acc Last 4", value=safe_str(fin_data.get('account_last4')))
         f_ifsc = st.text_input("IFSC", value=safe_str(fin_data.get('ifsc')))
         
-        submitted = st.form_submit_button("Save Changes", width="stretch")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            submitted = st.form_submit_button("💾 Save Changes", type="primary", use_container_width=True)
+        with col_btn2:
+            st.write("")
+            st.write("")
+            cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
+            
         if submitted:
             if f_pan and not validate_pan(f_pan):
                 st.error("Invalid PAN format. Must be 5 letters, 4 numbers, 1 letter.")
             else:
-                supabase.table('creators').update({"email": c_email, "phone_number": c_phone, "notes": c_notes, "status": c_status, "payout_rate": c_payout_rate}).eq('id', creator_id).execute()
-                if fin_data:
-                    supabase.table('creator_financial_info').update({"legal_name": f_legal, "pan_number": f_pan, "upi_id": f_upi, "bank_name": f_bank, "account_holder_name": f_holder, "account_number_last4": f_acc, "ifsc": f_ifsc}).eq('creator_id', creator_id).execute()
-                st.success("✅ Updated successfully!")
-                st.session_state['edit_mode'] = False
-                st.rerun()
+                # Helper to convert empty strings to None (prevents DB errors)
+                def clean(val):
+                    return val if val else None
+
+                try:
+                    # 1. Update Core Creator Data
+                    supabase.table('creators').update({
+                        "email": c_email, 
+                        "phone_number": c_phone, 
+                        "notes": c_notes, 
+                        "status": c_status,
+                        "payout_rate": c_payout_rate
+                    }).eq('id', creator_id).execute()
+                    
+                    # 2. Upsert Financial Info (Creates row if missing, updates if exists)
+                    supabase.table('creator_financial_info').upsert({
+                        "creator_id": creator_id,
+                        "legal_name": clean(f_legal), 
+                        "pan_number": clean(f_pan), 
+                        "upi_id": clean(f_upi),
+                        "bank_name": clean(f_bank), 
+                        "account_holder_name": clean(f_holder),
+                        "account_last4": clean(f_acc),  # ✅ FIXED: Correct column name
+                        "ifsc": clean(f_ifsc)
+                    }, on_conflict='creator_id').execute()
+                        
+                    st.success("✅ Updated successfully!")
+                    st.session_state['edit_mode'] = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to update: {e}")
+                    
+        elif cancel_btn:
+            st.session_state['edit_mode'] = False
+            st.rerun()

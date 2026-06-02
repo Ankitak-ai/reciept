@@ -37,46 +37,33 @@ total_platform_commission = sum(p.get('platform_commission_inr', 0) or 0 for p i
 net_revenue = total_gmv - total_refunds
 operating_profit = total_platform_commission - total_gateway_fees
 
-# Expense Calculations
 total_expenses = sum(e.get('amount_inr', 0) or 0 for e in expenses)
 final_net_profit = operating_profit - total_expenses
 
-# Balance Sheet Metrics
 accounts_payable = sum(p.get('creator_share_inr', 0) or 0 for p in payouts if p.get('status') == 'PENDING')
 cash_disbursed = sum(p.get('creator_share_inr', 0) or 0 for p in payouts if p.get('status') == 'PAID')
+
+# Helper for tabular accounting format (parentheses for negative numbers)
+def acc_format(val):
+    if val == "" or val is None: return ""
+    val = float(val) / 100
+    return f"₹ {val:,.2f}" if val >= 0 else f"(₹ {abs(val):,.2f})"
 
 # ==============================================================================
 # TABS
 # ==============================================================================
-tab_pl, tab_exp, tab_bs, tab_export = st.tabs(["📈 Profit & Loss", "💸 Business Expenses", "⚖️ Balance Sheet", "⬇️ CA Export"])
+tab_dash, tab_stmts, tab_exp, tab_export = st.tabs([
+    "📊 Dashboard", "📑 Formal Statements", "💸 Expenses", "⬇️ CA Export"
+])
 
-# --- TAB 1: P&L ---
-with tab_pl:
-    st.markdown("### 📈 Profit & Loss Statement")
-    st.info("This represents the operational performance of StreamHeart Private Limited.")
-    
+# --- TAB 1: DASHBOARD ---
+with tab_dash:
+    st.markdown("### 📈 Executive Summary")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Gross Transaction Value (GMV)", format_inr(total_gmv))
-    col2.metric("Less: Refunds", format_inr(total_refunds), delta_color="inverse")
-    col3.metric("Net Revenue", format_inr(net_revenue))
+    col1.metric("Net Revenue", format_inr(net_revenue))
+    col2.metric("Operating Profit (EBITDA)", format_inr(operating_profit))
+    col3.metric("🔥 Final Net Profit", format_inr(final_net_profit), delta_color="normal" if final_net_profit >= 0 else "inverse")
     
-    st.divider()
-    
-    col4, col5 = st.columns(2)
-    col4.metric("Gross Profit (Platform Commission)", format_inr(total_platform_commission), help="Total 11% / 10% cut retained by platform")
-    col5.metric("Less: Gateway Fees (Razorpay + GST)", format_inr(total_gateway_fees), delta_color="inverse", help="Absorbed by the platform")
-    
-    st.divider()
-    
-    st.metric("Operating Profit (EBITDA)", format_inr(operating_profit), help="Gross Profit - Gateway Fees")
-    
-    st.divider()
-    
-    col6, col7 = st.columns(2)
-    col6.metric("Less: Manual Business Expenses", format_inr(total_expenses), delta_color="inverse", help="Server, Marketing, Legal, SaaS")
-    col7.metric("🔥 Final Net Profit (Bottom Line)", format_inr(final_net_profit), delta_color="normal" if final_net_profit >= 0 else "inverse")
-    
-    # Visualization
     if total_creator_payouts_generated > 0 or total_platform_commission > 0:
         fig = px.pie(
             names=["Creator Payouts", "Platform Commission", "Gateway Fees", "Business Expenses"],
@@ -87,10 +74,93 @@ with tab_pl:
         )
         st.plotly_chart(fig, width="stretch")
 
-# --- TAB 2: EXPENSES ---
+# --- TAB 2: FORMAL STATEMENTS (TABULAR DATA) ---
+with tab_stmts:
+    st.markdown("### 📑 Formal Financial Statements")
+    st.caption("Standard accounting format for StreamHeart Private Limited (All figures in INR).")
+    
+    # 1. Statement of Profit & Loss
+    st.markdown("#### 📊 Statement of Profit & Loss")
+    is_data = {
+        "Particulars": [
+            "Gross Transaction Value (GMV)",
+            "Less: Refunds & Chargebacks",
+            "Net Revenue from Operations",
+            "Less: Creator Payouts (Cost of Services)",
+            "Gross Margin",
+            "Less: Payment Gateway Charges (Razorpay + GST)",
+            "Less: Operating & Administrative Expenses",
+            "NET PROFIT BEFORE TAX (NPBT)"
+        ],
+        "Amount (₹)": [
+            total_gmv,
+            -total_refunds,
+            net_revenue,
+            -total_creator_payouts_generated,
+            (net_revenue - total_creator_payouts_generated),
+            -total_gateway_fees,
+            -total_expenses,
+            final_net_profit
+        ]
+    }
+    df_is = pd.DataFrame(is_data)
+    df_is['Amount (₹)'] = df_is['Amount (₹)'].apply(acc_format)
+    
+    # Highlight the final profit row
+    st.dataframe(
+        df_is, 
+        hide_index=True, 
+        width="stretch",
+        column_config={
+            "Particulars": st.column_config.TextColumn(width="large"),
+            "Amount (₹)": st.column_config.TextColumn(width="medium", alignment="right")
+        }
+    )
+    
+    st.divider()
+    
+    # 2. Balance Sheet
+    st.markdown("#### ⚖️ Balance Sheet (Statement of Financial Position)")
+    bs_data = {
+        "Particulars": [
+            "CURRENT LIABILITIES",
+            "Accounts Payable (Unsettled Creator Payouts)",
+            "Total Current Liabilities",
+            "",
+            "EQUITY & RETAINED EARNINGS",
+            "Retained Earnings (Cumulative Net Profit)",
+            "Total Equity",
+            "",
+            "TOTAL LIABILITIES & EQUITY"
+        ],
+        "Amount (₹)": [
+            "",
+            accounts_payable,
+            accounts_payable,
+            "",
+            "",
+            final_net_profit,
+            final_net_profit,
+            "",
+            (accounts_payable + final_net_profit)
+        ]
+    }
+    df_bs = pd.DataFrame(bs_data)
+    df_bs['Amount (₹)'] = df_bs['Amount (₹)'].apply(lambda x: acc_format(x) if x != "" else "")
+    
+    st.dataframe(
+        df_bs, 
+        hide_index=True, 
+        width="stretch",
+        column_config={
+            "Particulars": st.column_config.TextColumn(width="large"),
+            "Amount (₹)": st.column_config.TextColumn(width="medium", alignment="right")
+        }
+    )
+
+# --- TAB 3: EXPENSES ---
 with tab_exp:
     st.markdown("### 💸 Manage Business Expenses")
-    st.info("Add manual expenses like server costs, marketing, software subscriptions, legal fees, etc.")
     
     with st.form("add_expense_form"):
         c1, c2, c3 = st.columns(3)
@@ -102,20 +172,16 @@ with tab_exp:
             expense_date = st.date_input("Date", value=datetime.date.today())
             
         description = st.text_input("Description / Notes", placeholder="e.g., AWS Monthly Bill, Supabase Pro Plan, CA Retainer")
-        
         submitted = st.form_submit_button("➕ Add Expense", type="primary", width="stretch")
         
         if submitted:
             if amount_rupees <= 0:
                 st.error("Amount must be greater than 0.")
             else:
-                amount_paise = int(amount_rupees * 100)
                 try:
                     supabase.table('expenses').insert({
-                        "category": category,
-                        "description": description,
-                        "amount_inr": amount_paise,
-                        "expense_date": expense_date.isoformat()
+                        "category": category, "description": description,
+                        "amount_inr": int(amount_rupees * 100), "expense_date": expense_date.isoformat()
                     }).execute()
                     st.success("✅ Expense added successfully!")
                     st.rerun()
@@ -123,100 +189,35 @@ with tab_exp:
                     st.error(f"Failed to add expense: {e}")
                     
     st.divider()
-    st.markdown("#### 📜 Expense Ledger")
     
     if expenses:
         df_exp = pd.DataFrame(expenses)
         df_exp['Amount (₹)'] = df_exp['amount_inr'].apply(lambda x: f"₹{x/100:,.2f}")
         df_exp['Date'] = pd.to_datetime(df_exp['expense_date']).dt.strftime('%d %b %Y')
-        
-        display_exp = df_exp[['id', 'Date', 'category', 'description', 'Amount (₹)']].rename(columns={
-            'category': 'Category',
-            'description': 'Description'
-        })
-        
+        display_exp = df_exp[['id', 'Date', 'category', 'description', 'Amount (₹)']].rename(columns={'category': 'Category', 'description': 'Description'})
         st.dataframe(display_exp.drop(columns=['id']), width="stretch", hide_index=True)
         
         st.markdown("##### 🗑️ Remove Incorrect Expense")
-        
-        exp_options = {
-            f"{row['Date']} | {row['Category']} | {row['Amount (₹)']} | {row['Description']}": row['id'] 
-            for _, row in display_exp.iterrows()
-        }
-        
+        exp_options = {f"{row['Date']} | {row['Category']} | {row['Amount (₹)']} | {row['Description']}": row['id'] for _, row in display_exp.iterrows()}
         col_del1, col_del2 = st.columns([3, 1])
-        with col_del1:
-            selected_exp = st.selectbox("Select expense to delete", options=list(exp_options.keys()))
+        with col_del1: selected_exp = st.selectbox("Select expense to delete", options=list(exp_options.keys()))
         with col_del2:
-            st.write("")
-            st.write("")
+            st.write(""); st.write("")
             if st.button("Delete", type="secondary", width="stretch"):
-                exp_id = exp_options[selected_exp]
-                supabase.table('expenses').delete().eq('id', exp_id).execute()
-                st.success("Deleted!")
+                supabase.table('expenses').delete().eq('id', exp_options[selected_exp]).execute()
                 st.rerun()
     else:
         st.info("No manual expenses recorded yet.")
 
-# --- TAB 3: BALANCE SHEET ---
-with tab_bs:
-    st.markdown("### ⚖️ Balance Sheet (Snapshot)")
-    st.info("Current liabilities represent money collected from viewers but not yet disbursed to creators.")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### 📉 Current Liabilities")
-        st.metric("Accounts Payable (Pending Payouts)", format_inr(accounts_payable), help="Money owed to creators for generated but unpaid payouts.")
-        
-    with col2:
-        st.markdown("#### 💸 Cash Flow (Outflows)")
-        st.metric("Cash Disbursed (Paid Payouts)", format_inr(cash_disbursed))
-        st.metric("Gateway Fees Paid to Razorpay", format_inr(total_gateway_fees))
-        st.metric("Manual Expenses Paid", format_inr(total_expenses))
-
 # --- TAB 4: CA EXPORT ---
 with tab_export:
     st.markdown("### ⬇️ Export for Chartered Accountant (CA)")
-    st.caption("Download the raw aggregated financial data for tax filing, GST reconciliation, and audit purposes.")
-    
     export_data = {
-        "Financial Metric": [
-            "Gross Transaction Value (GMV)",
-            "Total Refunds Processed",
-            "Net Revenue",
-            "Total Creator Payouts Generated",
-            "Platform Gross Profit (Commission)",
-            "Payment Gateway Fees (Razorpay + GST)",
-            "Operating Profit (EBITDA)",
-            "Total Manual Business Expenses",
-            "Final Net Profit (Bottom Line)",
-            "Accounts Payable (Pending Payouts)",
-            "Cash Disbursed to Creators"
-        ],
-        "Amount (INR)": [
-            total_gmv / 100,
-            total_refunds / 100,
-            net_revenue / 100,
-            total_creator_payouts_generated / 100,
-            total_platform_commission / 100,
-            total_gateway_fees / 100,
-            operating_profit / 100,
-            total_expenses / 100,
-            final_net_profit / 100,
-            accounts_payable / 100,
-            cash_disbursed / 100
-        ]
+        "Financial Metric": ["GMV", "Refunds", "Net Revenue", "Creator Payouts", "Platform Commission", "Gateway Fees", "Operating Expenses", "Net Profit", "Accounts Payable"],
+        "Amount (INR)": [total_gmv/100, total_refunds/100, net_revenue/100, total_creator_payouts_generated/100, total_platform_commission/100, total_gateway_fees/100, total_expenses/100, final_net_profit/100, accounts_payable/100]
     }
-    
     df_export = pd.DataFrame(export_data)
     st.dataframe(df_export, width="stretch", hide_index=True)
     
     csv = df_export.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download Financial Summary (CSV)",
-        data=csv,
-        file_name=f"streamheart_financials_{datetime.date.today().isoformat()}.csv",
-        mime="text/csv",
-        width="stretch"
-    )
+    st.download_button("📥 Download Financial Summary (CSV)", data=csv, file_name=f"streamheart_financials_{datetime.date.today().isoformat()}.csv", mime="text/csv", width="stretch")

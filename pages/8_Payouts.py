@@ -176,6 +176,9 @@ with tab_generate:
 # ==============================================================================
 # TAB 2: PAYOUT HISTORY & RECONCILIATION
 # ==============================================================================
+# ==============================================================================
+# TAB 2: PAYOUT HISTORY & RECONCILIATION
+# ==============================================================================
 with tab_history:
     st.markdown("### 📜 Generated Payouts Ledger")
     
@@ -204,8 +207,10 @@ with tab_history:
         st.dataframe(display_payouts, width="stretch", hide_index=True)
         
         st.divider()
+        
+        # --- UPDATE PAYOUT STATUS (RECONCILIATION) ---
         st.markdown("### 🏦 Mark Payout as PAID")
-        st.caption("Once the bank transfer is complete, update the status and enter the transaction reference.")
+        st.caption("Once the bank transfer is complete, update the status and enter the transaction reference. **Note: Paid payouts are locked and cannot be deleted.**")
         
         pending_payouts = df_payouts[df_payouts['status'] != 'PAID']
         
@@ -235,7 +240,50 @@ with tab_history:
                             "transaction_ref": utr_ref,
                             "payout_date": datetime.datetime.now(datetime.timezone.utc).isoformat()
                         }).eq('id', payout_id).execute()
-                        st.success("✅ Payout marked as PAID successfully!")
+                        st.success("✅ Payout marked as PAID and locked successfully!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to update status: {e}")
+
+        st.divider()
+
+        # --- 🗑️ ROLLBACK / DELETE PAYOUT (LOCKED IF PAID) ---
+        st.markdown("### 🗑️ Rollback / Delete Payout")
+        st.warning("⚠️ **Warning:** This will unlock the underlying donations and delete generated PDF receipts. **Payouts marked as 'PAID' are locked for accounting purposes and cannot be rolled back.**")
+
+        # Filter strictly to UNPAID payouts
+        unpaid_payouts = df_payouts[df_payouts['status'] != 'PAID']
+        
+        if unpaid_payouts.empty:
+            st.info("✅ All generated payouts are marked as PAID and locked in your financial records.")
+        else:
+            rollback_options = {
+                f"{row['Creator']} | {row['cycle_start_date']} to {row['cycle_end_date']} | {row['Creator Payout']} ({row['status']})": row['id'] 
+                for _, row in unpaid_payouts.iterrows()
+            }
+            
+            col_rb1, col_rb2 = st.columns([3, 1])
+            with col_rb1:
+                selected_rb_label = st.selectbox("Select Payout to Rollback", options=list(rollback_options.keys()))
+            with col_rb2:
+                st.write("")
+                st.write("")
+                if st.button("🗑️ Rollback & Delete", type="secondary", width="stretch"):
+                    payout_id_to_delete = rollback_options[selected_rb_label]
+                    try:
+                        # 1. Reset underlying payments to unsettled
+                        supabase.table('payments').update({
+                            "is_settled": False,
+                            "payout_id": None
+                        }).eq('payout_id', payout_id_to_delete).execute()
+                        
+                        # 2. Delete any generated receipts for this payout
+                        supabase.table('payout_receipts').delete().eq('payout_id', payout_id_to_delete).execute()
+                        
+                        # 3. Delete the payout record itself
+                        supabase.table('payouts').delete().eq('id', payout_id_to_delete).execute()
+                        
+                        st.success("✅ Payout rolled back successfully! The underlying payments are now unlocked.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to rollback payout: {e}")

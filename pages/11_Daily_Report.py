@@ -10,102 +10,111 @@ from utils.helpers import format_inr
 require_auth()
 
 st.set_page_config(page_title="Daily Operations Report", page_icon="📈", layout="wide")
-st.title("📈 Daily Operations Report")
+st.title("📈 Daily Operations & Comparison Report")
 
 # ==============================================================================
-# 1. IST TIMEZONE MATH (Crucial for accurate daily boundaries)
+# 1. DATE SELECTION & IST TIMEZONE MATH
 # ==============================================================================
 IST = ZoneInfo("Asia/Kolkata")
 now_ist = datetime.datetime.now(IST)
+today_ist_date = now_ist.date()
+yesterday_ist_date = today_ist_date - datetime.timedelta(days=1)
 
-# Today's Boundaries (IST)
-today_start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-today_end_ist = now_ist.replace(hour=23, minute=59, second=59, microsecond=999999)
+st.markdown("### 📅 Select Dates to Analyze")
+col_sel1, col_sel2 = st.columns(2)
+with col_sel1:
+    primary_date = st.date_input("Primary Date (Focus)", value=today_ist_date, help="The main day you want to analyze.")
+with col_sel2:
+    comparison_date = st.date_input("Comparison Date", value=yesterday_ist_date, help="The day to compare against (for Day-over-Day metrics).")
 
-# Yesterday's Boundaries (IST)
-yesterday_start_ist = today_start_ist - datetime.timedelta(days=1)
-yesterday_end_ist = today_start_ist - datetime.timedelta(microseconds=1)
+# Create exact IST boundaries for the selected dates
+primary_start_ist = datetime.datetime.combine(primary_date, datetime.time.min, tzinfo=IST)
+primary_end_ist = datetime.datetime.combine(primary_date, datetime.time.max, tzinfo=IST)
+
+comparison_start_ist = datetime.datetime.combine(comparison_date, datetime.time.min, tzinfo=IST)
+comparison_end_ist = datetime.datetime.combine(comparison_date, datetime.time.max, tzinfo=IST)
 
 # Convert to UTC for Supabase Queries
-today_start_utc = today_start_ist.astimezone(datetime.timezone.utc).isoformat()
-today_end_utc = today_end_ist.astimezone(datetime.timezone.utc).isoformat()
-yesterday_start_utc = yesterday_start_ist.astimezone(datetime.timezone.utc).isoformat()
-yesterday_end_utc = yesterday_end_ist.astimezone(datetime.timezone.utc).isoformat()
+primary_start_utc = primary_start_ist.astimezone(datetime.timezone.utc).isoformat()
+primary_end_utc = primary_end_ist.astimezone(datetime.timezone.utc).isoformat()
 
-st.caption(f"🕒 Reporting for: **{now_ist.strftime('%A, %d %B %Y')}** (IST)")
+comparison_start_utc = comparison_start_ist.astimezone(datetime.timezone.utc).isoformat()
+comparison_end_utc = comparison_end_ist.astimezone(datetime.timezone.utc).isoformat()
+
+st.caption(f"🕒 Analyzing: **{primary_date.strftime('%A, %d %B %Y')}** vs **{comparison_date.strftime('%A, %d %B %Y')}** (IST)")
 
 # ==============================================================================
 # 2. DATA FETCHING
 # ==============================================================================
-with st.spinner("Crunching today's numbers..."):
-    # Fetch Today's Payments
-    pay_today_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr, created_at')\
-        .gte('created_at', today_start_utc).lte('created_at', today_end_utc).execute()
-    pay_today = pay_today_res.data or []
+with st.spinner("Crunching the numbers..."):
+    # Fetch Primary Date Payments
+    pay_primary_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr, created_at')\
+        .gte('created_at', primary_start_utc).lte('created_at', primary_end_utc).execute()
+    pay_primary = pay_primary_res.data or []
 
-    # Fetch Yesterday's Payments
-    pay_yest_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr')\
-        .gte('created_at', yesterday_start_utc).lte('created_at', yesterday_end_utc).execute()
-    pay_yest = pay_yest_res.data or []
+    # Fetch Comparison Date Payments
+    pay_comp_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr')\
+        .gte('created_at', comparison_start_utc).lte('created_at', comparison_end_utc).execute()
+    pay_comp = pay_comp_res.data or []
 
-    # Fetch Today's Refunds
-    ref_today_res = supabase.table('refunds').select('amount_inr')\
-        .gte('created_at', today_start_utc).lte('created_at', today_end_utc).execute()
-    ref_today = ref_today_res.data or []
+    # Fetch Primary Date Refunds
+    ref_primary_res = supabase.table('refunds').select('amount_inr')\
+        .gte('created_at', primary_start_utc).lte('created_at', primary_end_utc).execute()
+    ref_primary = ref_primary_res.data or []
 
-    # Fetch New Creators Today
+    # Fetch New Creators on Primary Date
     new_creators_res = supabase.table('creators').select('id')\
-        .gte('created_at', today_start_utc).lte('created_at', today_end_utc).execute()
-    new_creators_today = len(new_creators_res.data or [])
+        .gte('created_at', primary_start_utc).lte('created_at', primary_end_utc).execute()
+    new_creators_primary = len(new_creators_res.data or [])
 
 # ==============================================================================
-# 3. CALCULATIONS & DAY-OVER-DAY (DoD) METRICS
+# 3. CALCULATIONS & COMPARISON METRICS
 # ==============================================================================
-today_gmv = sum(p.get('amount_inr', 0) or 0 for p in pay_today)
-yest_gmv = sum(p.get('amount_inr', 0) or 0 for p in pay_yest)
+primary_gmv = sum(p.get('amount_inr', 0) or 0 for p in pay_primary)
+comp_gmv = sum(p.get('amount_inr', 0) or 0 for p in pay_comp)
 
-today_fees = sum((p.get('fee_inr', 0) or 0) + (p.get('tax_inr', 0) or 0) for p in pay_today)
-today_refunds = sum(r.get('amount_inr', 0) or 0 for r in ref_today)
-today_txn_count = len(pay_today)
-yest_txn_count = len(pay_yest)
+primary_fees = sum((p.get('fee_inr', 0) or 0) + (p.get('tax_inr', 0) or 0) for p in pay_primary)
+primary_refunds = sum(r.get('amount_inr', 0) or 0 for r in ref_primary)
+primary_txn_count = len(pay_primary)
+comp_txn_count = len(pay_comp)
 
 # Helper for Delta %
-def calc_delta(today, yesterday):
-    if yesterday == 0:
-        return "N/A" if today == 0 else "+∞"
-    return f"{((today - yesterday) / yesterday) * 100:.1f}%"
+def calc_delta(primary, comparison):
+    if comparison == 0:
+        return "N/A" if primary == 0 else "+∞"
+    return f"{((primary - comparison) / comparison) * 100:.1f}%"
 
-delta_gmv = calc_delta(today_gmv, yest_gmv)
-delta_txns = calc_delta(today_txn_count, yest_txn_count)
+delta_gmv = calc_delta(primary_gmv, comp_gmv)
+delta_txns = calc_delta(primary_txn_count, comp_txn_count)
 
-# ✅ FIX: Safely initialize peak hour variables for the EOD report
-peak_hour_str = "No activity yet today"
+# Safely initialize peak hour variables for the report
+peak_hour_str = "No activity on this day"
 
 # ==============================================================================
 # 4. UI LAYOUT
 # ==============================================================================
-tab_metrics, tab_hourly, tab_export = st.tabs(["📊 Executive Summary", "⏰ Hourly Heatmap", "📋 Shareable EOD Report"])
+tab_metrics, tab_hourly, tab_export = st.tabs(["📊 Executive Summary", "⏰ Hourly Heatmap", "📋 Shareable Report"])
 
 # --- TAB 1: METRICS ---
 with tab_metrics:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Today's Gross Volume (GMV)", format_inr(today_gmv), delta=delta_gmv)
-    c2.metric("Total Transactions", today_txn_count, delta=delta_txns)
-    c3.metric("Gateway Fees Paid", format_inr(today_fees))
-    c4.metric("Refunds Processed", format_inr(today_refunds), delta_color="inverse" if today_refunds > 0 else "off")
+    c1.metric(f"Primary Date GMV", format_inr(primary_gmv), delta=delta_gmv, help=f"Compared to {comparison_date.strftime('%d %b')}")
+    c2.metric("Total Transactions", primary_txn_count, delta=delta_txns)
+    c3.metric("Gateway Fees Paid", format_inr(primary_fees))
+    c4.metric("Refunds Processed", format_inr(primary_refunds), delta_color="inverse" if primary_refunds > 0 else "off")
 
     st.divider()
     c5, c6 = st.columns(2)
-    c5.metric("Net Revenue (GMV - Refunds)", format_inr(today_gmv - today_refunds))
-    c6.metric("New Creators Onboarded", new_creators_today)
+    c5.metric("Net Revenue (GMV - Refunds)", format_inr(primary_gmv - primary_refunds))
+    c6.metric("New Creators Onboarded", new_creators_primary)
 
-# --- TAB 2: HOURLY HEATMAP ---
+# --- TAB 2: HOURLY HEATMAP (Primary Date) ---
 with tab_hourly:
-    st.markdown("### ⏰ Transaction Volume by Hour (IST)")
-    st.caption("Identify peak streaming and donation hours.")
+    st.markdown(f"### ⏰ Transaction Volume by Hour ({primary_date.strftime('%d %b %Y')} IST)")
+    st.caption("Identify peak streaming and donation hours for the primary date.")
     
-    if pay_today:
-        df_hourly = pd.DataFrame(pay_today)
+    if pay_primary:
+        df_hourly = pd.DataFrame(pay_primary)
         # Convert UTC created_at back to IST hour
         df_hourly['ist_hour'] = pd.to_datetime(df_hourly['created_at']).dt.tz_convert(IST).dt.hour
         
@@ -115,7 +124,7 @@ with tab_hourly:
         all_hours = pd.DataFrame({'ist_hour': range(24)})
         hourly_counts = pd.merge(all_hours, hourly_counts, on='ist_hour', how='left').fillna(0)
         
-        # ✅ FIX: Calculate peak hour safely
+        # Calculate peak hour safely
         if hourly_counts['count'].max() > 0:
             max_idx = hourly_counts['count'].idxmax()
             peak_hr = int(hourly_counts.loc[max_idx, 'ist_hour'])
@@ -133,29 +142,30 @@ with tab_hourly:
         fig.update_layout(xaxis=dict(dtick=1))
         st.plotly_chart(fig, width="stretch")
     else:
-        st.info("No transactions recorded yet today.")
+        st.info(f"No transactions recorded on {primary_date}.")
 
-# --- TAB 3: SHAREABLE EOD REPORT ---
+# --- TAB 3: SHAREABLE REPORT ---
 with tab_export:
-    st.markdown("### 📋 Shareable End-of-Day (EOD) Summary")
+    st.markdown("### 📋 Shareable Performance Report")
     st.caption("Copy this formatted text and paste it directly into your team's WhatsApp, Slack, or Email.")
     
     # Calculate Platform Net for the day (Rough est based on 11% avg platform cut)
-    platform_comm_today = (today_gmv - today_refunds) * 0.11 
+    platform_comm_primary = (primary_gmv - primary_refunds) * 0.11 
     
     eod_text = f"""
-📊 *StreamHeart Daily Ops Report*
-🗓 *Date:* {now_ist.strftime('%d %b %Y')} (IST)
+📊 *StreamHeart Performance Report*
+🗓 *Focus Date:* {primary_date.strftime('%d %b %Y')} (IST)
+⚖️ *Compared to:* {comparison_date.strftime('%d %b %Y')}
 
 💰 *FINANCIALS*
-• Gross Volume (GMV): {format_inr(today_gmv)} ({delta_gmv} vs yesterday)
-• Net Volume (After Refunds): {format_inr(today_gmv - today_refunds)}
-• Gateway Fees Paid: {format_inr(today_fees)}
-• Refunds Issued: {format_inr(today_refunds)}
+• Gross Volume (GMV): {format_inr(primary_gmv)} ({delta_gmv} vs comp)
+• Net Volume (After Refunds): {format_inr(primary_gmv - primary_refunds)}
+• Gateway Fees Paid: {format_inr(primary_fees)}
+• Refunds Issued: {format_inr(primary_refunds)}
 
 🧾 *OPERATIONS*
-• Total Transactions: {today_txn_count} ({delta_txns} vs yesterday)
-• New Creators Onboarded: {new_creators_today}
+• Total Transactions: {primary_txn_count} ({delta_txns} vs comp)
+• New Creators Onboarded: {new_creators_primary}
 
 ⏰ *PEAK ACTIVITY*
 • Highest Volume Hour: {peak_hour_str}
@@ -168,7 +178,7 @@ _Generated automatically by StreamHeart Finance Infrastructure._
     st.download_button(
         label="⬇️ Download as .txt",
         data=eod_text,
-        file_name=f"StreamHeart_Daily_Report_{now_ist.strftime('%Y-%m-%d')}.txt",
+        file_name=f"StreamHeart_Report_{primary_date.strftime('%Y-%m-%d')}.txt",
         mime="text/plain",
         width="stretch"
     )

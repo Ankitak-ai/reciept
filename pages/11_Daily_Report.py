@@ -78,6 +78,9 @@ def calc_delta(today, yesterday):
 delta_gmv = calc_delta(today_gmv, yest_gmv)
 delta_txns = calc_delta(today_txn_count, yest_txn_count)
 
+# ✅ FIX: Safely initialize peak hour variables for the EOD report
+peak_hour_str = "No activity yet today"
+
 # ==============================================================================
 # 4. UI LAYOUT
 # ==============================================================================
@@ -112,6 +115,13 @@ with tab_hourly:
         all_hours = pd.DataFrame({'ist_hour': range(24)})
         hourly_counts = pd.merge(all_hours, hourly_counts, on='ist_hour', how='left').fillna(0)
         
+        # ✅ FIX: Calculate peak hour safely
+        if hourly_counts['count'].max() > 0:
+            max_idx = hourly_counts['count'].idxmax()
+            peak_hr = int(hourly_counts.loc[max_idx, 'ist_hour'])
+            peak_txns = int(hourly_counts.loc[max_idx, 'count'])
+            peak_hour_str = f"{peak_hr:02d}:00 IST ({peak_txns} txns)"
+        
         fig = px.bar(
             hourly_counts, 
             x='ist_hour', 
@@ -130,8 +140,8 @@ with tab_export:
     st.markdown("### 📋 Shareable End-of-Day (EOD) Summary")
     st.caption("Copy this formatted text and paste it directly into your team's WhatsApp, Slack, or Email.")
     
-    # Calculate Platform Net for the day
-    platform_comm_today = (today_gmv - today_refunds) * 0.11 # Rough est based on 89% avg payout
+    # Calculate Platform Net for the day (Rough est based on 11% avg platform cut)
+    platform_comm_today = (today_gmv - today_refunds) * 0.11 
     
     eod_text = f"""
 📊 *StreamHeart Daily Ops Report*
@@ -148,12 +158,12 @@ with tab_export:
 • New Creators Onboarded: {new_creators_today}
 
 ⏰ *PEAK ACTIVITY*
-• Highest Volume Hour: {hourly_counts.loc[hourly_counts['count'].idxmax()]['ist_hour']:02.0f}:00 IST ({int(hourly_counts['count'].max())} txns)
+• Highest Volume Hour: {peak_hour_str}
 
 _Generated automatically by StreamHeart Finance Infrastructure._
     """
     
-    st.text_area("Report Text (Click to copy)", eod_text, height=350)
+    st.text_area("Report Text (Click inside to copy)", eod_text, height=350)
     
     st.download_button(
         label="⬇️ Download as .txt",

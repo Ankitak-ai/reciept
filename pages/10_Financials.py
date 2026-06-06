@@ -18,12 +18,10 @@ st.title("📊 StreamHeart Financials & Balance Sheet")
 IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
-# Default to current financial year (April 1 to March 31)
 fy_start_year = today_ist.year if today_ist.month >= 4 else today_ist.year - 1
 default_start = datetime.date(fy_start_year, 4, 1)
 default_end = today_ist
 
-# Initialize session state for dates so preset buttons work correctly
 if 'fin_start_date' not in st.session_state:
     st.session_state.fin_start_date = default_start
 if 'fin_end_date' not in st.session_state:
@@ -36,11 +34,9 @@ with col1:
 with col2:
     end_date = st.date_input("End Date", value=st.session_state.fin_end_date, key="end_widget")
 
-# Update session state if user manually changes the widget
 st.session_state.fin_start_date = start_date
 st.session_state.fin_end_date = end_date
 
-# Quick presets
 preset_col1, preset_col2, preset_col3, preset_col4 = st.columns(4)
 with preset_col1:
     if st.button("Current Month", width="stretch"):
@@ -64,7 +60,6 @@ with preset_col4:
         st.session_state.fin_end_date = today_ist
         st.rerun()
 
-# Convert to IST boundaries then UTC for Supabase
 start_dt_ist = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=IST)
 end_dt_ist = datetime.datetime.combine(end_date, datetime.time.max, tzinfo=IST)
 start_iso = start_dt_ist.astimezone(datetime.timezone.utc).isoformat()
@@ -76,7 +71,6 @@ st.caption(f"🕒 Analyzing period: **{start_date.strftime('%d %b %Y')}** to **{
 # 2. DATA FETCHING (Filtered by Date & Accrual Basis)
 # ==============================================================================
 with st.spinner("Aggregating financial data..."):
-    # Fetch payments WITH the creator's payout rate to calculate exact COGS
     payments_res = supabase.table('payments').select(
         'amount_inr, fee_inr, tax_inr, creators:creator_id(payout_rate)'
     ).gte('created_at', start_iso).lte('created_at', end_iso).execute()
@@ -84,7 +78,6 @@ with st.spinner("Aggregating financial data..."):
     refunds_res = supabase.table('refunds').select('amount_inr')\
         .gte('created_at', start_iso).lte('created_at', end_iso).execute()
         
-    # Fetch payouts to track Accounts Payable (Liabilities)
     payouts_res = supabase.table('payouts').select('creator_share_inr, status, created_at')\
         .gte('created_at', start_iso).lte('created_at', end_iso).execute()
         
@@ -103,12 +96,10 @@ total_gmv = 0
 total_expected_creator_share = 0
 total_gateway_fees = 0
 
-# Calculate exact margins based on every transaction's specific payout rate
 for p in payments:
     gross = p.get('amount_inr', 0) or 0
     total_gmv += gross
     
-    # Safely get the creator's rate (default to 89% if missing)
     creator_data = p.get('creators')
     if isinstance(creator_data, list) and len(creator_data) > 0:
         rate = float(creator_data[0].get('payout_rate', 89))
@@ -122,25 +113,14 @@ for p in payments:
 
 total_refunds = sum(r.get('amount_inr', 0) or 0 for r in refunds)
 
-# True Net Revenue (Cash actually kept)
 net_revenue = total_gmv - total_refunds
-
-# True Gross Margin (Net Revenue - What we owe creators)
 gross_margin = net_revenue - total_expected_creator_share
-
-# Operating Profit (Gross Margin - Razorpay Fees)
 operating_profit = gross_margin - total_gateway_fees
-
 total_expenses = sum(e.get('amount_inr', 0) or 0 for e in expenses)
-
-# FINAL NPBT (Operating Profit - Manual Expenses)
 final_net_profit = operating_profit - total_expenses
 
-# Balance Sheet Metrics (Liabilities)
 accounts_payable = sum(p.get('creator_share_inr', 0) or 0 for p in payouts if p.get('status') == 'PENDING')
-cash_disbursed = sum(p.get('creator_share_inr', 0) or 0 for p in payouts if p.get('status') == 'PAID')
 
-# Helper for tabular accounting format (parentheses for negative numbers)
 def acc_format(val):
     if val == "" or val is None: return ""
     val = float(val) / 100
@@ -149,11 +129,52 @@ def acc_format(val):
 # ==============================================================================
 # 4. TABS
 # ==============================================================================
-tab_dash, tab_stmts, tab_exp, tab_export = st.tabs([
-    "📊 Dashboard", "📑 Formal Statements", "💸 Expenses", "⬇️ CA Export"
+tab_simple, tab_dash, tab_stmts, tab_exp, tab_export = st.tabs([
+    "💰 Simple Breakdown", "📊 Dashboard", "📑 Formal Statements", "💸 Expenses", "⬇️ CA Export"
 ])
 
-# --- TAB 1: DASHBOARD ---
+# --- ✨ NEW TAB 1: SIMPLE BREAKDOWN ---
+with tab_simple:
+    st.markdown("### 💰 StreamHeart's Take-Home Profit Calculator")
+    st.markdown("Here is the exact step-by-step flow of where the money went during this period. No accounting jargon, just the raw numbers.")
+    
+    breakdown_data = {
+        "Step": [
+            "1️⃣ Total Money Collected (After Refunds)",
+            "2️⃣ Less: Paid to Creators (Their 89%/90% Share)",
+            "3️⃣ Less: Paid to Razorpay (Gateway Fees + GST)",
+            "4️⃣ Less: Company Bills (Logged Expenses)",
+            "🏆 StreamHeart's Final Take-Home Profit"
+        ],
+        "Amount (₹)": [
+            net_revenue / 100,
+            - (total_expected_creator_share / 100),
+            - (total_gateway_fees / 100),
+            - (total_expenses / 100),
+            final_net_profit / 100
+        ]
+    }
+    df_breakdown = pd.DataFrame(breakdown_data)
+    
+    def simple_format(val):
+        if val >= 0: return f"₹ {val:,.2f}"
+        else: return f"- ₹ {abs(val):,.2f}"
+        
+    df_breakdown['Amount (₹)'] = df_breakdown['Amount (₹)'].apply(simple_format)
+    
+    st.dataframe(
+        df_breakdown, 
+        hide_index=True, 
+        width="stretch",
+        column_config={
+            "Step": st.column_config.TextColumn(width="large"),
+            "Amount (₹)": st.column_config.TextColumn(width="medium")
+        }
+    )
+    
+    st.info(f"💡 **How to read this:** Out of the **{format_inr(net_revenue)}** that successfully hit your bank account from viewers, you paid your creators and Razorpay their dues. After subtracting your company's manual bills (**{format_inr(total_expenses)}**), StreamHeart Private Limited is left with exactly **{format_inr(final_net_profit)}** in pure profit.")
+
+# --- TAB 2: DASHBOARD ---
 with tab_dash:
     st.markdown("### 📈 Executive Summary")
     col1, col2, col3 = st.columns(3)
@@ -169,25 +190,19 @@ with tab_dash:
             hole=0.4,
             color_discrete_sequence=px.colors.sequential.Blues_r
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
-# --- TAB 2: FORMAL STATEMENTS (TABULAR DATA) ---
+# --- TAB 3: FORMAL STATEMENTS ---
 with tab_stmts:
     st.markdown("### 📑 Formal Financial Statements")
     st.caption(f"Standard accounting format for StreamHeart Private Limited for period {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}.")
     
-    # 1. Statement of Profit & Loss
     st.markdown("#### 📊 Statement of Profit & Loss")
     is_data = {
         "Particulars": [
-            "Gross Transaction Value (GMV)",
-            "Less: Refunds & Chargebacks",
-            "Net Revenue from Operations",
-            "Less: Creator Payouts (Cost of Services)",
-            "Gross Margin",
-            "Less: Payment Gateway Charges (Razorpay + GST)",
-            "Less: Operating & Administrative Expenses",
-            "NET PROFIT BEFORE TAX (NPBT)"
+            "Gross Transaction Value (GMV)", "Less: Refunds & Chargebacks", "Net Revenue from Operations",
+            "Less: Creator Payouts (Cost of Services)", "Gross Margin", "Less: Payment Gateway Charges (Razorpay + GST)",
+            "Less: Operating & Administrative Expenses", "NET PROFIT BEFORE TAX (NPBT)"
         ],
         "Amount (₹)": [
             total_gmv, -total_refunds, net_revenue, -total_expected_creator_share,
@@ -200,7 +215,6 @@ with tab_stmts:
     
     st.divider()
     
-    # 2. Balance Sheet
     st.markdown("#### ⚖️ Balance Sheet (Statement of Financial Position)")
     bs_data = {
         "Particulars": [
@@ -209,15 +223,14 @@ with tab_stmts:
             "TOTAL LIABILITIES & EQUITY"
         ],
         "Amount (₹)": [
-            "", accounts_payable, accounts_payable, "",
-            "", final_net_profit, final_net_profit, "", (accounts_payable + final_net_profit)
+            "", accounts_payable, accounts_payable, "", "", final_net_profit, final_net_profit, "", (accounts_payable + final_net_profit)
         ]
     }
     df_bs = pd.DataFrame(bs_data)
     df_bs['Amount (₹)'] = df_bs['Amount (₹)'].apply(lambda x: acc_format(x) if x != "" else "")
     st.dataframe(df_bs, hide_index=True, width="stretch", column_config={"Particulars": st.column_config.TextColumn(width="large"), "Amount (₹)": st.column_config.TextColumn(width="medium")})
 
-# --- TAB 3: EXPENSES ---
+# --- TAB 4: EXPENSES ---
 with tab_exp:
     st.markdown("### 💸 Manage Business Expenses")
     
@@ -259,7 +272,7 @@ with tab_exp:
     else:
         st.info("No manual expenses recorded in this period.")
 
-# --- TAB 4: CA EXPORT ---
+# --- TAB 5: CA EXPORT ---
 with tab_export:
     st.markdown("### ⬇️ Export for Chartered Accountant (CA)")
     st.caption(f"Download the raw aggregated financial data for the period {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}.")

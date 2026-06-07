@@ -75,6 +75,7 @@ with st.spinner("Aggregating financial data..."):
         'amount_inr, fee_inr, tax_inr, creators:creator_id(payout_rate)'
     ).gte('created_at', start_iso).lte('created_at', end_iso).execute()
         
+    # We still fetch refunds just to track technical failures, but we WON'T deduct them from revenue
     refunds_res = supabase.table('refunds').select('amount_inr')\
         .gte('created_at', start_iso).lte('created_at', end_iso).execute()
         
@@ -90,7 +91,7 @@ payouts = payouts_res.data or []
 expenses = expenses_res.data or []
 
 # ==============================================================================
-# 3. CORE ACCOUNTING CALCULATIONS (ACCURAL BASIS)
+# 3. CORE ACCOUNTING CALCULATIONS (FIXED: No Refund Deductions)
 # ==============================================================================
 total_gmv = 0
 total_expected_creator_share = 0
@@ -111,11 +112,14 @@ for p in payments:
     total_expected_creator_share += gross * (rate / 100)
     total_gateway_fees += (p.get('fee_inr', 0) or 0) + (p.get('tax_inr', 0) or 0)
 
-total_refunds = sum(r.get('amount_inr', 0) or 0 for r in refunds)
+# Track technical failures for operational visibility, but DO NOT subtract from Revenue
+total_technical_refunds = sum(r.get('amount_inr', 0) or 0 for r in refunds)
 
-net_revenue = total_gmv - total_refunds
+# ✅ FIXED: Net Revenue is simply the successful GMV
+net_revenue = total_gmv 
 gross_margin = net_revenue - total_expected_creator_share
 operating_profit = gross_margin - total_gateway_fees
+
 total_expenses = sum(e.get('amount_inr', 0) or 0 for e in expenses)
 final_net_profit = operating_profit - total_expenses
 
@@ -133,14 +137,14 @@ tab_simple, tab_dash, tab_stmts, tab_exp, tab_export = st.tabs([
     "💰 Simple Breakdown", "📊 Dashboard", "📑 Formal Statements", "💸 Expenses", "⬇️ CA Export"
 ])
 
-# --- ✨ NEW TAB 1: SIMPLE BREAKDOWN ---
+# --- TAB 1: SIMPLE BREAKDOWN ---
 with tab_simple:
     st.markdown("### 💰 StreamHeart's Take-Home Profit Calculator")
-    st.markdown("Here is the exact step-by-step flow of where the money went during this period. No accounting jargon, just the raw numbers.")
+    st.markdown("Here is the exact step-by-step flow of where the successful money went. (Technical bank failures are excluded as they never hit the account).")
     
     breakdown_data = {
         "Step": [
-            "1️⃣ Total Money Collected (After Refunds)",
+            "1️⃣ Total Money Collected (Successful Donations)",
             "2️⃣ Less: Paid to Creators (Their 89%/90% Share)",
             "3️⃣ Less: Paid to Razorpay (Gateway Fees + GST)",
             "4️⃣ Less: Company Bills (Logged Expenses)",
@@ -173,12 +177,15 @@ with tab_simple:
     )
     
     st.info(f"💡 **How to read this:** Out of the **{format_inr(net_revenue)}** that successfully hit your bank account from viewers, you paid your creators and Razorpay their dues. After subtracting your company's manual bills (**{format_inr(total_expenses)}**), StreamHeart Private Limited is left with exactly **{format_inr(final_net_profit)}** in pure profit.")
+    
+    if total_technical_refunds > 0:
+        st.caption(f"ℹ️ *Note: {format_inr(total_technical_refunds)} in technical bank failures/auto-refunds were recorded this period, but excluded from this P&L as they never settled in the company account.*")
 
 # --- TAB 2: DASHBOARD ---
 with tab_dash:
     st.markdown("### 📈 Executive Summary")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Net Revenue", format_inr(net_revenue))
+    col1.metric("Successful Revenue (GMV)", format_inr(net_revenue))
     col2.metric("Operating Profit (EBITDA)", format_inr(operating_profit))
     col3.metric("🔥 Final Net Profit", format_inr(final_net_profit), delta_color="normal" if final_net_profit >= 0 else "inverse")
     
@@ -200,13 +207,22 @@ with tab_stmts:
     st.markdown("#### 📊 Statement of Profit & Loss")
     is_data = {
         "Particulars": [
-            "Gross Transaction Value (GMV)", "Less: Refunds & Chargebacks", "Net Revenue from Operations",
-            "Less: Creator Payouts (Cost of Services)", "Gross Margin", "Less: Payment Gateway Charges (Razorpay + GST)",
-            "Less: Operating & Administrative Expenses", "NET PROFIT BEFORE TAX (NPBT)"
+            "Gross Transaction Value (Successful GMV)", 
+            "Net Revenue from Operations",
+            "Less: Creator Payouts (Cost of Services)", 
+            "Gross Margin", 
+            "Less: Payment Gateway Charges (Razorpay + GST)",
+            "Less: Operating & Administrative Expenses", 
+            "NET PROFIT BEFORE TAX (NPBT)"
         ],
         "Amount (₹)": [
-            total_gmv, -total_refunds, net_revenue, -total_expected_creator_share,
-            gross_margin, -total_gateway_fees, -total_expenses, final_net_profit
+            total_gmv, 
+            net_revenue, 
+            -total_expected_creator_share,
+            gross_margin, 
+            -total_gateway_fees, 
+            -total_expenses, 
+            final_net_profit
         ]
     }
     df_is = pd.DataFrame(is_data)
@@ -278,10 +294,11 @@ with tab_export:
     st.caption(f"Download the raw aggregated financial data for the period {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}.")
     
     export_data = {
-        "Financial Metric": ["GMV", "Refunds", "Net Revenue", "Expected Creator Payouts (COGS)", "Gross Margin", "Gateway Fees", "Operating Expenses", "Net Profit (NPBT)", "Accounts Payable"],
+        "Financial Metric": ["Successful GMV (Net Revenue)", "Expected Creator Payouts (COGS)", "Gross Margin", "Gateway Fees", "Operating Expenses", "Net Profit (NPBT)", "Accounts Payable", "Technical Bank Failures (Off-Book)"],
         "Amount (INR)": [
-            total_gmv/100, total_refunds/100, net_revenue/100, total_expected_creator_share/100, 
-            gross_margin/100, total_gateway_fees/100, total_expenses/100, final_net_profit/100, accounts_payable/100
+            net_revenue/100, total_expected_creator_share/100, 
+            gross_margin/100, total_gateway_fees/100, total_expenses/100, 
+            final_net_profit/100, accounts_payable/100, total_technical_refunds/100
         ]
     }
     df_export = pd.DataFrame(export_data)

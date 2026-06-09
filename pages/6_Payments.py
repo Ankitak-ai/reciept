@@ -42,13 +42,11 @@ with col1:
                 url = "https://api.razorpay.com/v1/payments?count=100"
                 response = requests.get(url, headers=headers)
                 
-                # Safely handle API response format
                 json_res = response.json()
                 rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
                 
                 synced_count = 0
                 for p in rzp_payments:
-                    # Safely extract receipt (handles cases where 'notes' is [] instead of {})
                     receipt = p.get('receipt')
                     if not receipt:
                         notes = p.get('notes')
@@ -85,7 +83,6 @@ with col1:
                 ref_url = "https://api.razorpay.com/v1/refunds?count=100"
                 ref_response = requests.get(ref_url, headers=headers)
                 
-                # Safely handle Refund API response format
                 ref_json = ref_response.json()
                 rzp_refunds = ref_json.get('items', []) if isinstance(ref_json, dict) else (ref_json if isinstance(ref_json, list) else [])
                 
@@ -94,7 +91,7 @@ with col1:
                         "refund_id": r['id'],
                         "payment_id": r['payment_id'],
                         "amount_inr": r.get('amount', 0),
-                        "amount": r.get('amount', 0),  # ✅ FIX: Satisfies DB's NOT NULL constraint
+                        "amount": r.get('amount', 0),
                         "status": r['status'],
                         "created_at": pd.to_datetime(r['created_at'], unit='s').isoformat()
                     }, on_conflict='refund_id').execute()
@@ -186,7 +183,6 @@ if total_unmapped > 0:
             end_iso = end_dt.astimezone(datetime.timezone.utc).isoformat()
             
             try:
-                # Update all NULL creator_ids within the date range
                 res = supabase.table('payments').update({"creator_id": selected_creator_id})\
                     .is_('creator_id', 'null')\
                     .gte('created_at', start_iso)\
@@ -201,3 +197,44 @@ if total_unmapped > 0:
                 st.error(f"Failed to remap: {e}")
 else:
     st.success("🎉 All payments in the database are successfully mapped to creators!")
+
+# ==============================================================================
+# 4. DEBUG RAW DATA (NEW)
+# ==============================================================================
+st.divider()
+st.markdown("### 🐞 Debug: Raw Razorpay Data (Last 10)")
+st.caption("This bypasses the database and asks Razorpay directly what it is sending for the receipt and notes fields.")
+
+if st.button("🔍 Fetch Raw Razorpay Data", type="secondary", width="stretch"):
+    try:
+        rzp_key_id = st.secrets.get("RAZORPAY_KEY_ID")
+        rzp_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
+        
+        if not rzp_key_id or not rzp_key_secret:
+            st.error("Razorpay API keys missing.")
+            st.stop()
+            
+        auth_header = base64.b64encode(f"{rzp_key_id}:{rzp_key_secret}".encode()).decode()
+        headers = {"Authorization": f"Basic {auth_header}"}
+        
+        url = "https://api.razorpay.com/v1/payments?count=10"
+        response = requests.get(url, headers=headers)
+        
+        json_res = response.json()
+        rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
+        
+        debug_data = []
+        for p in rzp_payments:
+            debug_data.append({
+                "Payment ID": p.get('id'),
+                "Amount (₹)": p.get('amount', 0) / 100,
+                "Raw Receipt Field": str(p.get('receipt', 'NULL/EMPTY')),
+                "Raw Notes Field": str(p.get('notes', 'NULL/EMPTY'))
+            })
+            
+        st.dataframe(pd.DataFrame(debug_data), width="stretch", hide_index=True)
+        
+        st.info("👆 **Look at the 'Raw Receipt Field' column.** If it says `NULL/EMPTY`, then your app/website isn't passing the creator code to Razorpay when the user pays. If it has a value but no underscore (e.g., `12345` instead of `nm_12345`), our parser is failing to read it.")
+        
+    except Exception as e:
+        st.error(f"Debug failed: {e}")

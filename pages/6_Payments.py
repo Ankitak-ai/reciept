@@ -51,7 +51,6 @@ with col1:
                     order_id = p.get('order_id')
                     
                     # ✅ FIX: Razorpay attaches the receipt to the ORDER, not the Payment.
-                    # We must fetch the order to get the receipt ID (e.g., "snk_rp_...").
                     if order_id:
                         try:
                             order_url = f"https://api.razorpay.com/v1/orders/{order_id}"
@@ -62,20 +61,22 @@ with col1:
                         except Exception:
                             pass
                             
-                    # Fallback to notes if receipt is still empty
                     if not receipt:
                         notes = p.get('notes')
                         if isinstance(notes, dict):
                             receipt = notes.get('receipt', '')
                             
-                    # Extract creator code (e.g., "snk" from "snk_rp_123...")
                     creator_code = receipt.split('_')[0] if receipt else None
                     
                     creator_id = None
                     if creator_code:
-                        creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).maybe_single().execute()
-                        if creator_res.data:
-                            creator_id = creator_res.data['id']
+                        try:
+                            # ✅ FIX: Use .limit(1) instead of .maybe_single() to prevent NoneType errors
+                            creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).limit(1).execute()
+                            if creator_res and creator_res.data and len(creator_res.data) > 0:
+                                creator_id = creator_res.data[0]['id']
+                        except Exception:
+                            pass
                             
                     supabase.table('payments').upsert({
                         "payment_id": p['id'],
@@ -129,7 +130,8 @@ payments_res = supabase.table('payments').select(
     '*, creators:creator_id(creator_handle, creator_code)'
 ).order('created_at', desc=True).limit(100).execute()
 
-payments_data = payments_res.data or []
+# ✅ FIX: Safely check if res and res.data exist
+payments_data = payments_res.data if (payments_res and payments_res.data) else []
 
 if not payments_data:
     st.info("No payments found in the database yet.")
@@ -154,7 +156,7 @@ else:
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Gross (Last 100)", format_inr(total_gross))
     m2.metric("Total Razorpay Fees", format_inr(total_fees))
-    m3.metric("Unmapped Payments", unmapped_count, help="Payments where the creator code was missing or invalid in the Razorpay receipt ID.")
+    m3.metric("Unmapped Payments", unmapped_count, help="Payments where the creator code was missing or invalid.")
 
 st.divider()
 
@@ -162,10 +164,10 @@ st.divider()
 # 3. BULK REMAP TOOL
 # ==============================================================================
 st.markdown("### 🔗 Bulk Remap Unmapped Payments")
-st.caption("Use this to assign historical payments to a creator that was added to the system AFTER the payments were received.")
+st.caption("Use this to assign historical payments to a creator that was added AFTER the payments were received.")
 
 unmapped_count_res = supabase.table('payments').select('id', count='exact').is_('creator_id', 'null').execute()
-total_unmapped = unmapped_count_res.count or 0
+total_unmapped = unmapped_count_res.count if (unmapped_count_res and unmapped_count_res.count is not None) else 0
 
 if total_unmapped > 0:
     st.info(f"There are currently **{total_unmapped}** unmapped payments in the database.")
@@ -178,7 +180,7 @@ if total_unmapped > 0:
             remap_end = st.date_input("End Date", value=today_ist)
         with c3:
             creators_res = supabase.table('creators').select('id, creator_handle, creator_code').eq('status', 'ACTIVE').order('creator_handle').execute()
-            creators_list = creators_res.data or []
+            creators_list = creators_res.data if (creators_res and creators_res.data) else []
             creator_options = {f"{c['creator_handle']} ({c['creator_code']})": c['id'] for c in creators_list}
             
             if not creator_options:
@@ -203,7 +205,8 @@ if total_unmapped > 0:
                     .lte('created_at', end_iso)\
                     .execute()
                 
-                updated_count = len(res.data) if res.data else 0
+                # ✅ FIX: Safely check if res and res.data exist
+                updated_count = len(res.data) if (res and res.data) else 0
                 st.success(f"✅ Successfully mapped {updated_count} payments to {selected_creator_label}!")
                 time.sleep(1)
                 st.rerun()

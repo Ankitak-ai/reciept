@@ -47,14 +47,28 @@ with col1:
                 
                 synced_count = 0
                 for p in rzp_payments:
-                    receipt = p.get('receipt')
+                    receipt = ''
+                    order_id = p.get('order_id')
+                    
+                    # ✅ FIX: Razorpay attaches the receipt to the ORDER, not the Payment.
+                    # We must fetch the order to get the receipt ID (e.g., "snk_rp_...").
+                    if order_id:
+                        try:
+                            order_url = f"https://api.razorpay.com/v1/orders/{order_id}"
+                            order_res = requests.get(order_url, headers=headers)
+                            if order_res.status_code == 200:
+                                order_data = order_res.json()
+                                receipt = order_data.get('receipt', '')
+                        except Exception:
+                            pass
+                            
+                    # Fallback to notes if receipt is still empty
                     if not receipt:
                         notes = p.get('notes')
                         if isinstance(notes, dict):
                             receipt = notes.get('receipt', '')
-                        else:
-                            receipt = ''
                             
+                    # Extract creator code (e.g., "snk" from "snk_rp_123...")
                     creator_code = receipt.split('_')[0] if receipt else None
                     
                     creator_id = None
@@ -65,7 +79,7 @@ with col1:
                             
                     supabase.table('payments').upsert({
                         "payment_id": p['id'],
-                        "order_id": p.get('order_id'),
+                        "order_id": order_id,
                         "amount_inr": p['amount'],
                         "fee_inr": p.get('fee', 0),
                         "tax_inr": p.get('tax', 0),
@@ -197,44 +211,3 @@ if total_unmapped > 0:
                 st.error(f"Failed to remap: {e}")
 else:
     st.success("🎉 All payments in the database are successfully mapped to creators!")
-
-# ==============================================================================
-# 4. DEBUG RAW DATA (NEW)
-# ==============================================================================
-st.divider()
-st.markdown("### 🐞 Debug: Raw Razorpay Data (Last 10)")
-st.caption("This bypasses the database and asks Razorpay directly what it is sending for the receipt and notes fields.")
-
-if st.button("🔍 Fetch Raw Razorpay Data", type="secondary", width="stretch"):
-    try:
-        rzp_key_id = st.secrets.get("RAZORPAY_KEY_ID")
-        rzp_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
-        
-        if not rzp_key_id or not rzp_key_secret:
-            st.error("Razorpay API keys missing.")
-            st.stop()
-            
-        auth_header = base64.b64encode(f"{rzp_key_id}:{rzp_key_secret}".encode()).decode()
-        headers = {"Authorization": f"Basic {auth_header}"}
-        
-        url = "https://api.razorpay.com/v1/payments?count=10"
-        response = requests.get(url, headers=headers)
-        
-        json_res = response.json()
-        rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
-        
-        debug_data = []
-        for p in rzp_payments:
-            debug_data.append({
-                "Payment ID": p.get('id'),
-                "Amount (₹)": p.get('amount', 0) / 100,
-                "Raw Receipt Field": str(p.get('receipt', 'NULL/EMPTY')),
-                "Raw Notes Field": str(p.get('notes', 'NULL/EMPTY'))
-            })
-            
-        st.dataframe(pd.DataFrame(debug_data), width="stretch", hide_index=True)
-        
-        st.info("👆 **Look at the 'Raw Receipt Field' column.** If it says `NULL/EMPTY`, then your app/website isn't passing the creator code to Razorpay when the user pays. If it has a value but no underscore (e.g., `12345` instead of `nm_12345`), our parser is failing to read it.")
-        
-    except Exception as e:
-        st.error(f"Debug failed: {e}")

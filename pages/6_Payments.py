@@ -38,13 +38,25 @@ with col1:
                 auth_header = base64.b64encode(f"{rzp_key_id}:{rzp_key_secret}".encode()).decode()
                 headers = {"Authorization": f"Basic {auth_header}"}
                 
+                # Fetch Payments
                 url = "https://api.razorpay.com/v1/payments?count=100"
                 response = requests.get(url, headers=headers)
-                rzp_payments = response.json().get('items', [])
+                
+                # ✅ FIX: Safely handle API response format
+                json_res = response.json()
+                rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
                 
                 synced_count = 0
                 for p in rzp_payments:
-                    receipt = p.get('receipt') or p.get('notes', {}).get('receipt', '')
+                    # ✅ FIX: Safely extract receipt (handles cases where 'notes' is [] instead of {})
+                    receipt = p.get('receipt')
+                    if not receipt:
+                        notes = p.get('notes')
+                        if isinstance(notes, dict):
+                            receipt = notes.get('receipt', '')
+                        else:
+                            receipt = ''
+                            
                     creator_code = receipt.split('_')[0] if receipt else None
                     
                     creator_id = None
@@ -69,9 +81,13 @@ with col1:
                     }, on_conflict='payment_id').execute()
                     synced_count += 1
                     
+                # Fetch Refunds
                 ref_url = "https://api.razorpay.com/v1/refunds?count=100"
                 ref_response = requests.get(ref_url, headers=headers)
-                rzp_refunds = ref_response.json().get('items', [])
+                
+                # ✅ FIX: Safely handle Refund API response format
+                ref_json = ref_response.json()
+                rzp_refunds = ref_json.get('items', []) if isinstance(ref_json, dict) else (ref_json if isinstance(ref_json, list) else [])
                 
                 for r in rzp_refunds:
                     supabase.table('refunds').upsert({
@@ -131,7 +147,7 @@ else:
 st.divider()
 
 # ==============================================================================
-# 3. BULK REMAP TOOL (NEW FEATURE)
+# 3. BULK REMAP TOOL
 # ==============================================================================
 st.markdown("### 🔗 Bulk Remap Unmapped Payments")
 st.caption("Use this to assign historical payments to a creator that was added to the system AFTER the payments were received.")

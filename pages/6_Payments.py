@@ -42,13 +42,13 @@ with col1:
                 url = "https://api.razorpay.com/v1/payments?count=100"
                 response = requests.get(url, headers=headers)
                 
-                # ✅ FIX: Safely handle API response format
+                # Safely handle API response format
                 json_res = response.json()
                 rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
                 
                 synced_count = 0
                 for p in rzp_payments:
-                    # ✅ FIX: Safely extract receipt (handles cases where 'notes' is [] instead of {})
+                    # Safely extract receipt (handles cases where 'notes' is [] instead of {})
                     receipt = p.get('receipt')
                     if not receipt:
                         notes = p.get('notes')
@@ -85,7 +85,7 @@ with col1:
                 ref_url = "https://api.razorpay.com/v1/refunds?count=100"
                 ref_response = requests.get(ref_url, headers=headers)
                 
-                # ✅ FIX: Safely handle Refund API response format
+                # Safely handle Refund API response format
                 ref_json = ref_response.json()
                 rzp_refunds = ref_json.get('items', []) if isinstance(ref_json, dict) else (ref_json if isinstance(ref_json, list) else [])
                 
@@ -93,7 +93,8 @@ with col1:
                     supabase.table('refunds').upsert({
                         "refund_id": r['id'],
                         "payment_id": r['payment_id'],
-                        "amount_inr": r['amount'],
+                        "amount_inr": r.get('amount', 0),
+                        "amount": r.get('amount', 0),  # ✅ FIX: Satisfies DB's NOT NULL constraint
                         "status": r['status'],
                         "created_at": pd.to_datetime(r['created_at'], unit='s').isoformat()
                     }, on_conflict='refund_id').execute()

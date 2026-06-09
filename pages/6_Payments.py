@@ -1,184 +1,186 @@
 import streamlit as st
 import pandas as pd
 import requests
+import base64
+import time
+import datetime
+from zoneinfo import ZoneInfo
 from utils.supabase_client import supabase
-
 from utils.auth import require_auth
+from utils.helpers import format_inr, to_ist
+
 require_auth()
 
 st.set_page_config(page_title="Razorpay Payments", page_icon="💳", layout="wide")
 st.title("💳 Razorpay Payment Sync & Management")
 
-# ⚠️ IMPORTANT: Replace this with your actual Edge Function URL 
-# (Found in Supabase Dashboard -> Edge Functions -> sync-razorpay -> Invoke URL)
-EDGE_FUNCTION_URL = "https://ewbaqylcvdmbigtjarow.supabase.co/functions/v1/sync-razorpay"
+IST = ZoneInfo("Asia/Kolkata")
+today_ist = datetime.datetime.now(IST).date()
 
 # ==============================================================================
-# 1. SYNC CONTROLS (Triggering the Edge Function)
+# 1. MANUAL SYNC FALLBACK
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
-col1, col2 = st.columns([1, 3])
+st.caption("Webhooks handle real-time syncing automatically. Use this only as a fallback or to backfill historical data.")
 
+col1, col2 = st.columns([1, 3])
 with col1:
-    if st.button("🔄 Sync Razorpay Payments", type="primary", use_container_width=True):
+    if st.button("🔄 Force Manual Sync", type="primary", width="stretch"):
         with st.spinner("Triggering background sync... This may take a minute."):
             try:
-                # FIX: Pass the Supabase Service Role Key to bypass the Edge Gateway JWT requirement
-                supabase_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
-                headers = {
-                    "Authorization": f"Bearer {supabase_key}",
-                    "Content-Type": "application/json"
-                }
+                rzp_key_id = st.secrets.get("RAZORPAY_KEY_ID")
+                rzp_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
                 
-                # Call the Edge Function (Timeout set to 5 minutes for large datasets)
-                response = requests.post(EDGE_FUNCTION_URL, headers=headers, timeout=300)
-                
-                # FIX: Check HTTP status BEFORE trying to parse JSON 
-                # (Prevents crashes if Supabase returns a 401/404 HTML error page)
-                if response.status_code != 200:
-                    st.error(f"❌ Edge Function returned HTTP {response.status_code}")
-                    with st.expander("🔍 Debug: Raw Edge Function Response"):
-                        st.code(response.text)
+                if not rzp_key_id or not rzp_key_secret:
+                    st.error("Razorpay API keys missing in Streamlit Secrets.")
                     st.stop()
-
-                # Parse the JSON response from Deno
-                result = response.json()
+                    
+                auth_header = base64.b64encode(f"{rzp_key_id}:{rzp_key_secret}".encode()).decode()
+                headers = {"Authorization": f"Basic {auth_header}"}
                 
-                if result.get("success"):
-                    st.session_state["sync_metrics"] = result["metrics"]
-                    st.session_state["unmapped_receipts"] = result.get("unmapped_receipts", [])
-                    st.success("✅ Sync completed successfully!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Sync failed: {result.get('error', 'Unknown error')}")
-                    with st.expander("🔍 Debug: Raw Edge Function Response"):
-                        st.code(str(result))
-                        
-            except requests.exceptions.Timeout:
-                st.error("⏱️ Sync timed out after 5 minutes. Check Supabase Edge Function logs.")
+                url = "https://api.razorpay.com/v1/payments?count=100"
+                response = requests.get(url, headers=headers)
+                rzp_payments = response.json().get('items', [])
+                
+                synced_count = 0
+                for p in rzp_payments:
+                    receipt = p.get('receipt') or p.get('notes', {}).get('receipt', '')
+                    creator_code = receipt.split('_')[0] if receipt else None
+                    
+                    creator_id = None
+                    if creator_code:
+                        creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).maybe_single().execute()
+                        if creator_res.data:
+                            creator_id = creator_res.data['id']
+                            
+                    supabase.table('payments').upsert({
+                        "payment_id": p['id'],
+                        "order_id": p.get('order_id'),
+                        "amount_inr": p['amount'],
+                        "fee_inr": p.get('fee', 0),
+                        "tax_inr": p.get('tax', 0),
+                        "status": p['status'],
+                        "method": p['method'],
+                        "original_currency": p['currency'],
+                        "original_amount": p['amount'],
+                        "creator_id": creator_id,
+                        "is_settled": False,
+                        "created_at": pd.to_datetime(p['created_at'], unit='s').isoformat()
+                    }, on_conflict='payment_id').execute()
+                    synced_count += 1
+                    
+                ref_url = "https://api.razorpay.com/v1/refunds?count=100"
+                ref_response = requests.get(ref_url, headers=headers)
+                rzp_refunds = ref_response.json().get('items', [])
+                
+                for r in rzp_refunds:
+                    supabase.table('refunds').upsert({
+                        "refund_id": r['id'],
+                        "payment_id": r['payment_id'],
+                        "amount_inr": r['amount'],
+                        "status": r['status'],
+                        "created_at": pd.to_datetime(r['created_at'], unit='s').isoformat()
+                    }, on_conflict='refund_id').execute()
+                    
+                st.success(f"✅ Successfully synced {synced_count} payments and {len(rzp_refunds)} refunds!")
+                time.sleep(1)
+                st.rerun()
+                
             except Exception as e:
-                st.error(f"❌ Failed to connect to Edge Function: {str(e)}")
+                st.error(f"Sync failed: {e}")
+
+st.divider()
 
 # ==============================================================================
-# 2. SYNC SUMMARY METRICS
+# 2. GLOBAL PAYMENTS LEDGER
 # ==============================================================================
-if "sync_metrics" in st.session_state:
-    st.markdown("---")
-    st.markdown("### 📊 Last Sync Summary")
-    m = st.session_state["sync_metrics"]
-    
-    cols = st.columns(5)
-    cols[0].metric("Fetched", m.get("fetched", 0))
-    cols[1].metric("Inserted", m.get("inserted", 0), delta_color="normal")
-    cols[2].metric("Duplicates", m.get("duplicate", 0), delta_color="inverse")
-    cols[3].metric("Unmapped", m.get("unmapped", 0), delta_color="inverse")
-    cols[4].metric("Errors", m.get("errors", 0), delta_color="inverse")
+st.markdown("### 📜 Global Payments Ledger")
+st.caption("Showing the last 100 successful payments across all creators. (Timestamps are in IST).")
 
-    # Show Unmapped Receipts Details
-    if st.session_state.get("unmapped_receipts"):
-        with st.expander(f"⚠️ View {len(st.session_state['unmapped_receipts'])} Unmapped Receipts"):
-            st.dataframe(
-                pd.DataFrame(st.session_state["unmapped_receipts"]), 
-                use_container_width=True, 
-                hide_index=True
-            )
-            st.info("💡 Tip: Ensure the creator's `creator_code` matches the prefix of the Razorpay receipt (e.g., receipt 'mc_rp_123' requires creator_code 'mc').")
-
-# ==============================================================================
-# 3. PAYMENT VIEWER (Dataframe)
-# ==============================================================================
-st.markdown("---")
-st.markdown("### 📜 Recent Payments")
-
-# Fetch recent payments
-res = supabase.table('payments').select(
-    'payment_id, order_id, amount, fee, tax, status, method, email, created_at, creator_id'
+payments_res = supabase.table('payments').select(
+    '*, creators:creator_id(creator_handle, creator_code)'
 ).order('created_at', desc=True).limit(100).execute()
 
-if not res.data:
-    st.info("📭 No payments synced yet. Click the 'Sync Razorpay Payments' button above to fetch data.")
+payments_data = payments_res.data or []
+
+if not payments_data:
+    st.info("No payments found in the database yet.")
 else:
-    df = pd.DataFrame(res.data)
+    df_payments = pd.DataFrame(payments_data)
     
-    # Format amounts from paise to Rupees safely
-    def format_inr(val):
-        if val is None:
-            return "N/A"
-        try:
-            return f"₹{float(val)/100:.2f}"
-        except (ValueError, TypeError):
-            return "N/A"
+    df_payments['Creator'] = df_payments['creators'].apply(lambda x: x['creator_handle'] if x else 'Unmapped')
+    df_payments['Code'] = df_payments['creators'].apply(lambda x: x['creator_code'] if x else '-')
+    df_payments['Gross (INR)'] = df_payments['amount_inr'].apply(format_inr)
+    df_payments['Fees (INR)'] = df_payments['fee_inr'].apply(format_inr)
+    df_payments['Date (IST)'] = df_payments['created_at'].apply(to_ist)
+    
+    display_cols = ['Date (IST)', 'payment_id', 'Creator', 'Code', 'original_currency', 'Gross (INR)', 'Fees (INR)', 'method', 'status']
+    
+    st.dataframe(df_payments[display_cols], width="stretch", hide_index=True)
+    
+    total_gross = sum(p.get('amount_inr', 0) or 0 for p in payments_data)
+    total_fees = sum(p.get('fee_inr', 0) or 0 for p in payments_data)
+    unmapped_count = len([p for p in payments_data if not p.get('creator_id')])
+    
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Gross (Last 100)", format_inr(total_gross))
+    m2.metric("Total Razorpay Fees", format_inr(total_fees))
+    m3.metric("Unmapped Payments", unmapped_count, help="Payments where the creator code was missing or invalid in the Razorpay receipt ID.")
 
-    df['amount'] = df['amount'].apply(format_inr)
-    df['fee'] = df['fee'].apply(format_inr)
-    df['tax'] = df['tax'].apply(format_inr)
-    
-    # Fetch creator handles for better readability in the table
-    creator_ids = df['creator_id'].dropna().unique().tolist()
-    if creator_ids:
-        creators_res = supabase.table('creators').select('id, creator_handle').in_('id', creator_ids).execute()
-        creator_map = {c['id']: c['creator_handle'] for c in creators_res.data}
-        df['creator'] = df['creator_id'].map(creator_map).fillna('Unmapped')
-    else:
-        df['creator'] = 'Unmapped'
+st.divider()
 
-    # Reorder and clean columns for display
-    display_cols = ['created_at', 'payment_id', 'creator', 'amount', 'fee', 'tax', 'status', 'method', 'email']
-    safe_display_cols = [col for col in display_cols if col in df.columns]
-    
-    # Rename created_at for better UI
-    df_display = df[safe_display_cols].rename(columns={'created_at': 'Timestamp'})
-    
-    st.dataframe(
-        df_display, 
-        use_container_width=True, 
-        hide_index=True,
-        column_config={
-            "Timestamp": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm"),
-            "status": st.column_config.TextColumn("Status"),
-            "amount": st.column_config.TextColumn("Amount"),
-        }
-    )
+# ==============================================================================
+# 3. BULK REMAP TOOL (NEW FEATURE)
+# ==============================================================================
+st.markdown("### 🔗 Bulk Remap Unmapped Payments")
+st.caption("Use this to assign historical payments to a creator that was added to the system AFTER the payments were received.")
 
-    # ==============================================================================
-    # 4. RAW PAYLOAD INSPECTOR
-    # ==============================================================================
-    st.markdown("---")
-    st.markdown("### 🔍 Raw Payload Inspector")
-    st.caption("Inspect the exact JSON responses returned by the Razorpay API for debugging and auditing.")
+unmapped_count_res = supabase.table('payments').select('id', count='exact').is_('creator_id', 'null').execute()
+total_unmapped = unmapped_count_res.count or 0
+
+if total_unmapped > 0:
+    st.info(f"There are currently **{total_unmapped}** unmapped payments in the database.")
     
-    # Create a readable list for the selectbox
-    payment_options = [f"{row['payment_id']} | {row['creator']} | {row['amount']}" for _, row in df.iterrows()]
-    
-    selected_payment_str = st.selectbox(
-        "Select a payment to inspect raw JSON payloads",
-        options=payment_options,
-        index=0
-    )
-    
-    if selected_payment_str:
-        # Extract the actual payment_id from the formatted string
-        selected_payment_id = selected_payment_str.split(" | ")[0]
-        
-        # Fetch raw payloads for the selected payment
-        raw_res = supabase.table('payments').select(
-            'raw_payment_payload, raw_order_payload'
-        ).eq('payment_id', selected_payment_id).single().execute()
-        
-        raw_data = raw_res.data
-        
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.markdown("**📦 Raw Payment Payload**")
-            if raw_data and raw_data.get('raw_payment_payload'):
-                st.json(raw_data.get('raw_payment_payload'), expanded=False)
+    with st.form("bulk_remap_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            remap_start = st.date_input("Start Date", value=today_ist - datetime.timedelta(days=30))
+        with c2:
+            remap_end = st.date_input("End Date", value=today_ist)
+        with c3:
+            creators_res = supabase.table('creators').select('id, creator_handle, creator_code').eq('status', 'ACTIVE').order('creator_handle').execute()
+            creators_list = creators_res.data or []
+            creator_options = {f"{c['creator_handle']} ({c['creator_code']})": c['id'] for c in creators_list}
+            
+            if not creator_options:
+                st.warning("No active creators found.")
+                selected_creator_id = None
             else:
-                st.warning("No raw payment payload found.")
+                selected_creator_label = st.selectbox("Assign to Creator", options=list(creator_options.keys()))
+                selected_creator_id = creator_options[selected_creator_label]
                 
-        with col_b:
-            st.markdown("**📦 Raw Order Payload**")
-            if raw_data and raw_data.get('raw_order_payload'):
-                st.json(raw_data.get('raw_order_payload'), expanded=False)
-            else:
-                st.info("No order payload found. This typically happens with Wallet/UPI payments that do not generate a distinct Razorpay Order ID.")
+        submitted_remap = st.form_submit_button("🔗 Map Unmapped Payments", type="primary", width="stretch")
+        
+        if submitted_remap and selected_creator_id:
+            start_dt = datetime.datetime.combine(remap_start, datetime.time.min, tzinfo=IST)
+            end_dt = datetime.datetime.combine(remap_end, datetime.time.max, tzinfo=IST)
+            start_iso = start_dt.astimezone(datetime.timezone.utc).isoformat()
+            end_iso = end_dt.astimezone(datetime.timezone.utc).isoformat()
+            
+            try:
+                # Update all NULL creator_ids within the date range
+                res = supabase.table('payments').update({"creator_id": selected_creator_id})\
+                    .is_('creator_id', 'null')\
+                    .gte('created_at', start_iso)\
+                    .lte('created_at', end_iso)\
+                    .execute()
+                
+                updated_count = len(res.data) if res.data else 0
+                st.success(f"✅ Successfully mapped {updated_count} payments to {selected_creator_label}!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to remap: {e}")
+else:
+    st.success("🎉 All payments in the database are successfully mapped to creators!")

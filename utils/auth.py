@@ -1,6 +1,6 @@
 import streamlit as st
 from supabase import create_client
-from streamlit_js_eval import get_cookie, set_cookie, delete_cookie
+from streamlit_js_eval import get_cookie, set_cookie
 
 def get_auth_client():
     url = st.secrets["SUPABASE_URL"]
@@ -34,9 +34,9 @@ def logout():
     except:
         pass
         
-    # ✅ Delete cookies on logout
-    delete_cookie('sh_auth_token')
-    delete_cookie('sh_user_email')
+    # ✅ FIX: Expire cookies immediately (-1 days) to delete them from the browser
+    set_cookie('sh_auth_token', '', -1)
+    set_cookie('sh_user_email', '', -1)
     
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -48,7 +48,7 @@ def require_auth():
     Uses JS to fetch cookies without deadlocking the Streamlit render tree.
     """
     if not st.session_state.get('authenticated'):
-        # ✅ FIX: Use singular get_cookie()
+        # Use singular get_cookie()
         token = get_cookie('sh_auth_token')
         email = get_cookie('sh_user_email')
         

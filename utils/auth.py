@@ -1,14 +1,6 @@
 import streamlit as st
 from supabase import create_client
-from extra_streamlit_components import CookieManager
-import datetime
-
-# ✅ FIX 1: Cache the CookieManager so it only initializes once per server session
-@st.cache_resource
-def get_cookie_manager():
-    return CookieManager()
-
-cookie_manager = get_cookie_manager()
+from streamlit_js_eval import get_cookies, set_cookie, delete_cookie
 
 def get_auth_client():
     url = st.secrets["SUPABASE_URL"]
@@ -23,12 +15,9 @@ def login(email: str, password: str):
             st.session_state['authenticated'] = True
             st.session_state['user_email'] = res.user.email
             
-            # Save session to browser cookies for 7 days
-            expires = datetime.datetime.now() + datetime.timedelta(days=7)
-            
-            # ✅ FIX 2: Added unique keys to prevent Streamlit DuplicateWidgetID error
-            cookie_manager.set("sh_auth_token", res.session.access_token, expires_at=expires, key="set_token")
-            cookie_manager.set("sh_user_email", res.user.email, expires_at=expires, key="set_email")
+            # ✅ Save session to browser cookies for 7 days using JS eval
+            set_cookie('sh_auth_token', res.session.access_token, 7)
+            set_cookie('sh_user_email', res.user.email, 7)
             
             return True, None
     except Exception as e:
@@ -45,9 +34,9 @@ def logout():
     except:
         pass
         
-    # ✅ FIX 3: Added unique keys for deletion
-    cookie_manager.delete("sh_auth_token", key="delete_token")
-    cookie_manager.delete("sh_user_email", key="delete_email")
+    # ✅ Delete cookies on logout
+    delete_cookie('sh_auth_token')
+    delete_cookie('sh_user_email')
     
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -56,19 +45,29 @@ def logout():
 def require_auth():
     """
     Call this at the top of EVERY page. 
-    Checks session state, then checks cookies to restore session across tabs.
+    Uses JS to fetch cookies without deadlocking the Streamlit render tree.
     """
     if not st.session_state.get('authenticated'):
-        # ✅ FIX 4: Added unique keys for getting cookies
-        token = cookie_manager.get("sh_auth_token", key="get_token")
-        email = cookie_manager.get("sh_user_email", key="get_email")
+        # get_cookies() returns None on the very first millisecond of a page load 
+        # before the JavaScript has executed. We must let it load.
+        cookies = get_cookies()
+        
+        if cookies is None:
+            # JS hasn't loaded the cookies yet. Show a loading state and let the script finish.
+            st.info("🔄 Restoring your session...")
+            st.stop()
+            
+        # JS has loaded. Check if the auth token exists.
+        token = cookies.get('sh_auth_token')
+        email = cookies.get('sh_user_email')
         
         if token and email:
-            # Restore session state from cookie automatically
+            # ✅ Restore session state from cookie automatically
             st.session_state['authenticated'] = True
             st.session_state['user_email'] = email
+            st.rerun() # Rerun to apply the session state to the page
         else:
-            # Hide sidebar for unauthorized users
+            # Cookies loaded, but no token found -> Genuinely logged out
             st.markdown("""
                 <style>
                     [data-testid="stSidebar"] { display: none; }

@@ -6,3 +6,4 @@ reportlab==4.2.2
 qrcode[pil]==7.4.2
 num2words==0.5.13
 plotly
+extra-streamlit-components

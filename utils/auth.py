@@ -1,6 +1,6 @@
 import streamlit as st
 from supabase import create_client
-from streamlit_js_eval import get_cookies, set_cookie, delete_cookie
+from streamlit_js_eval import get_cookie, set_cookie, delete_cookie
 
 def get_auth_client():
     url = st.secrets["SUPABASE_URL"]
@@ -15,7 +15,7 @@ def login(email: str, password: str):
             st.session_state['authenticated'] = True
             st.session_state['user_email'] = res.user.email
             
-            # ✅ Save session to browser cookies for 7 days using JS eval
+            # ✅ Save session to browser cookies for 7 days
             set_cookie('sh_auth_token', res.session.access_token, 7)
             set_cookie('sh_user_email', res.user.email, 7)
             
@@ -48,26 +48,26 @@ def require_auth():
     Uses JS to fetch cookies without deadlocking the Streamlit render tree.
     """
     if not st.session_state.get('authenticated'):
-        # get_cookies() returns None on the very first millisecond of a page load 
-        # before the JavaScript has executed. We must let it load.
-        cookies = get_cookies()
-        
-        if cookies is None:
-            # JS hasn't loaded the cookies yet. Show a loading state and let the script finish.
-            st.info("🔄 Restoring your session...")
-            st.stop()
-            
-        # JS has loaded. Check if the auth token exists.
-        token = cookies.get('sh_auth_token')
-        email = cookies.get('sh_user_email')
+        # ✅ FIX: Use singular get_cookie()
+        token = get_cookie('sh_auth_token')
+        email = get_cookie('sh_user_email')
         
         if token and email:
             # ✅ Restore session state from cookie automatically
             st.session_state['authenticated'] = True
             st.session_state['user_email'] = email
             st.rerun() # Rerun to apply the session state to the page
+            
+        elif token is None and email is None:
+            # 🔄 DEADLOCK PREVENTION: 
+            # On the very first millisecond of a page load, JS hasn't evaluated yet, 
+            # so it returns None. We MUST let the script finish rendering so the 
+            # hidden JS component can execute in the browser and trigger a rerun.
+            st.info("🔄 Restoring your session...")
+            # DO NOT use st.stop() here!
+            
         else:
-            # Cookies loaded, but no token found -> Genuinely logged out
+            # JS has evaluated, and the cookies are genuinely empty/missing -> User is logged out
             st.markdown("""
                 <style>
                     [data-testid="stSidebar"] { display: none; }

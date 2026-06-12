@@ -104,12 +104,14 @@ st.divider()
 # ==============================================================================
 st.markdown("### 💰 Daily GMV & Transaction Volume")
 
-# Create figure with secondary y-axis for transactions
+# ✅ FIX 1: Convert dates to Pandas datetime for flawless Plotly rendering
+daily_stats['plot_date'] = pd.to_datetime(daily_stats['ist_date'])
+
 fig = go.Figure()
 
 # Bar chart for GMV
 fig.add_trace(go.Bar(
-    x=daily_stats['ist_date'],
+    x=daily_stats['plot_date'],
     y=daily_stats['daily_gmv']/100,
     name='Daily GMV (₹)',
     marker_color='#3b82f6',
@@ -119,7 +121,7 @@ fig.add_trace(go.Bar(
 
 # Line chart for transaction count overlay
 fig.add_trace(go.Scatter(
-    x=daily_stats['ist_date'],
+    x=daily_stats['plot_date'],
     y=daily_stats['daily_txns'],
     name='Transaction Count',
     marker_color='#f59e0b',
@@ -127,17 +129,18 @@ fig.add_trace(go.Scatter(
     yaxis='y2'
 ))
 
+# ✅ FIX 2: Use modern title_font syntax and standard layout
 fig.update_layout(
     title=f"Daily Revenue Pulse ({start_date.strftime('%d %b')} - {end_date.strftime('%d %b')})",
-    xaxis_title="Date",
+    xaxis=dict(title="Date"),
     yaxis=dict(
         title="GMV (₹)",
-        titlefont=dict(color='#3b82f6'),
+        title_font=dict(color='#3b82f6'),
         tickfont=dict(color='#3b82f6'),
     ),
     yaxis2=dict(
         title="Transactions",
-        titlefont=dict(color='#f59e0b'),
+        title_font=dict(color='#f59e0b'),
         tickfont=dict(color='#f59e0b'),
         overlaying="y",
         side="right"
@@ -148,7 +151,8 @@ fig.update_layout(
     height=500
 )
 
-st.plotly_chart(fig, width="stretch")
+# ✅ FIX 3: Use universally supported use_container_width for charts
+st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================================================
 # 5. DAILY BREAKDOWN TABLE
@@ -180,5 +184,5 @@ with col_i1:
     st.info(f"🏆 **Peak Revenue Day:** {peak_day_date.strftime('%d %b %Y')} with **{format_inr(peak_day_gmv)}** in GMV.")
 with col_i2:
     active_days = len(daily_stats)
-    zero_days = (end_date - start_date).days + 1 - active_days
-    st.info(f"📊 **Active Trading Days:** {active_days} out of {(end_date - start_date).days + 1} days in this period.")
+    total_days = (end_date - start_date).days + 1
+    st.info(f"📊 **Active Trading Days:** {active_days} out of {total_days} days in this period.")

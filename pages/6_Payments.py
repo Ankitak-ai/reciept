@@ -47,10 +47,15 @@ with col1:
                 
                 synced_count = 0
                 for p in rzp_payments:
+                    # ✅ CRITICAL FIX: Only sync payments that were actually captured (money in bank).
+                    # Ignore 'failed', 'created', or 'pending' statuses.
+                    if p.get('status') != 'captured':
+                        continue
+                        
                     receipt = ''
                     order_id = p.get('order_id')
                     
-                    # ✅ FIX: Razorpay attaches the receipt to the ORDER, not the Payment.
+                    # Razorpay attaches the receipt to the ORDER, not the Payment.
                     if order_id:
                         try:
                             order_url = f"https://api.razorpay.com/v1/orders/{order_id}"
@@ -71,7 +76,6 @@ with col1:
                     creator_id = None
                     if creator_code:
                         try:
-                            # ✅ FIX: Use .limit(1) instead of .maybe_single() to prevent NoneType errors
                             creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).limit(1).execute()
                             if creator_res and creator_res.data and len(creator_res.data) > 0:
                                 creator_id = creator_res.data[0]['id']
@@ -111,7 +115,7 @@ with col1:
                         "created_at": pd.to_datetime(r['created_at'], unit='s').isoformat()
                     }, on_conflict='refund_id').execute()
                     
-                st.success(f"✅ Successfully synced {synced_count} payments and {len(rzp_refunds)} refunds!")
+                st.success(f"✅ Successfully synced {synced_count} successful payments and {len(rzp_refunds)} refunds!")
                 time.sleep(1)
                 st.rerun()
                 
@@ -130,7 +134,6 @@ payments_res = supabase.table('payments').select(
     '*, creators:creator_id(creator_handle, creator_code)'
 ).order('created_at', desc=True).limit(100).execute()
 
-# ✅ FIX: Safely check if res and res.data exist
 payments_data = payments_res.data if (payments_res and payments_res.data) else []
 
 if not payments_data:
@@ -205,7 +208,6 @@ if total_unmapped > 0:
                     .lte('created_at', end_iso)\
                     .execute()
                 
-                # ✅ FIX: Safely check if res and res.data exist
                 updated_count = len(res.data) if (res and res.data) else 0
                 st.success(f"✅ Successfully mapped {updated_count} payments to {selected_creator_label}!")
                 time.sleep(1)

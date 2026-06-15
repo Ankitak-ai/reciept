@@ -35,7 +35,7 @@ def generate_payout_pdf(payout, creator, fin_info):
     p.drawString(50, height - 70, "Official Payout Receipt")
     
     p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, height - 120, f"Creator: {creator['creator_handle']}")
+    p.drawString(50, height - 120, f"Creator: {creator.get('creator_handle', 'N/A')}")
     p.drawString(50, height - 140, f"Payout ID: {payout['id'][:8]}...")
     p.drawString(50, height - 160, f"Generated: {pd.to_datetime(payout['created_at']).strftime('%d %b %Y')}")
     
@@ -124,20 +124,27 @@ with tab_generate:
         st.caption(f"🕒 Querying from: **{cycle_start.strftime('%d/%m/%Y %H:%M')} IST** to **{cycle_end.strftime('%d/%m/%Y %H:%M')} IST**")
         
         with st.spinner("Calculating unsettled earnings..."):
-            # ✅ FIX: Using fetch_all to ensure we don't miss a single unsettled tip
+            # ✅ FIX 1: Using fetch_all to ensure we don't miss a single unsettled tip
             unsettled_payments = fetch_all(lambda: supabase.table('payments').select(
                 'id, amount_inr, fee_inr, tax_inr'
             ).eq('creator_id', creator_id).eq('is_settled', False).gte('created_at', start_iso).lte('created_at', end_iso))
             
-            # Fetch refunds that happened in this cycle to deduct from the payout
+            # ✅ FIX 2: Bulletproof Refund Fetching (Avoids PostgREST Join Errors)
+            # Step A: Fetch all refunds in this cycle
             cycle_refunds = fetch_all(lambda: supabase.table('refunds').select(
-                'amount_inr, payments!inner(creator_id, created_at)'
+                'amount_inr, payment_id'
             ).gte('created_at', start_iso).lte('created_at', end_iso))
             
-            # Filter refunds specifically for this creator
+            # Step B: Get all payment IDs that belong to this creator
+            creator_payments_res = fetch_all(lambda: supabase.table('payments').select(
+                'payment_id'
+            ).eq('creator_id', creator_id))
+            creator_payment_ids = set(p['payment_id'] for p in creator_payments_res)
+            
+            # Step C: Filter refunds specifically for this creator in Python
             creator_refunds = [
                 r for r in cycle_refunds 
-                if isinstance(r.get('payments'), dict) and r['payments'].get('creator_id') == creator_id
+                if r.get('payment_id') in creator_payment_ids
             ]
 
         total_gross = sum(p.get('amount_inr', 0) or 0 for p in unsettled_payments)

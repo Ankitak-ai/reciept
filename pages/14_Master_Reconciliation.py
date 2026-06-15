@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from collections import Counter
-from utils.supabase_client import supabase
+from utils.supabase_client import supabase, fetch_all
 from utils.auth import require_auth
 from utils.helpers import format_inr
 
@@ -12,28 +12,25 @@ st.set_page_config(page_title="Master Reconciliation", page_icon="📊", layout=
 st.title("📊 Master Ledger & Reconciliation")
 st.caption("A complete, all-time breakdown of your actual Razorpay earnings, fees, and payment methods from your Clean Ledger.")
 
-# ✅ FIX: Helper function to bypass Supabase's strict 1,000 row limit
-def fetch_all_rows(table_name, select_cols):
-    all_data = []
-    offset = 0
-    limit = 1000
-    while True:
-        res = supabase.table(table_name).select(select_cols).range(offset, offset + limit - 1).execute()
-        data = res.data or []
-        all_data.extend(data)
-        if len(data) < limit:
-            break
-        offset += limit
-    return all_data
-
-with st.spinner("Aggregating all-time ledger data (bypassing 1k row limit)..."):
-    payments = fetch_all_rows('payments', 'amount_inr, fee_inr, tax_inr, status, method, original_currency, original_amount')
-    refunds = fetch_all_rows('refunds', 'amount_inr')
+# ==============================================================================
+# 1. DATA FETCHING (Bypassing 1000 Row Limit)
+# ==============================================================================
+with st.spinner("Aggregating all-time ledger data..."):
+    # ✅ FIX: Using fetch_all to bypass 1000 row limit
+    # This loops automatically until every single row is downloaded
+    payments = fetch_all(lambda: supabase.table('payments').select(
+        'amount_inr, fee_inr, tax_inr, status, method, original_currency, original_amount'
+    ))
+    
+    refunds = fetch_all(lambda: supabase.table('refunds').select('amount_inr'))
 
 if not payments:
     st.warning("No payments found in the database. Run a Deep Sync first!")
     st.stop()
 
+# ==============================================================================
+# 2. DATA PROCESSING & CALCULATIONS
+# ==============================================================================
 # Separate by status
 captured = [p for p in payments if p.get('status') == 'captured']
 failed = [p for p in payments if p.get('status') == 'failed']
@@ -51,9 +48,9 @@ amount_refunded = sum(r.get('amount_inr', 0) or 0 for r in refunds)
 methods = Counter(p.get('method', 'unknown') for p in captured)
 currencies = Counter(p.get('original_currency', 'INR') for p in captured)
 
-# ==========================================
-# UI METRICS
-# ==========================================
+# ==============================================================================
+# 3. UI METRICS
+# ==============================================================================
 st.markdown("### 💰 Financial Summary (Actual Money Received)")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Gross Captured", format_inr(gross_captured))
@@ -64,6 +61,9 @@ c5.metric("Amount Refunded", format_inr(amount_refunded), delta_color="inverse" 
 
 st.divider()
 
+# ==============================================================================
+# 4. LEDGER BREAKDOWN
+# ==============================================================================
 st.markdown("### 📈 Ledger Breakdown")
 col_stat1, col_stat2 = st.columns(2)
 
@@ -86,8 +86,17 @@ with col_stat2:
     
     # Pie chart for methods
     if sum(methods.values()) > 0:
-        fig = px.pie(names=list(methods.keys()), values=list(methods.values()), title="Payment Methods Distribution", hole=0.4)
+        fig = px.pie(
+            names=list(methods.keys()), 
+            values=list(methods.values()), 
+            title="Payment Methods Distribution", 
+            hole=0.4
+        )
         st.plotly_chart(fig, width="stretch")
 
 st.divider()
+
+# ==============================================================================
+# 5. INTEGRITY CHECK
+# ==============================================================================
 st.info(f"💡 **Data Integrity Check:** Successfully loaded **{len(payments)} total payments** and **{len(refunds)} refunds** from the database. (Bypassed the 1,000 row API limit).")

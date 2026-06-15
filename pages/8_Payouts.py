@@ -41,19 +41,19 @@ def generate_payout_pdf(payout, creator, fin_info):
     
     p.setFont("Helvetica", 12)
     y = height - 200
-    p.drawString(50, y, f"Cycle: {pd.to_datetime(payout['cycle_start']).strftime('%d %b')} to {pd.to_datetime(payout['cycle_end']).strftime('%d %b')}")
+    p.drawString(50, y, f"Cycle: {pd.to_datetime(payout.get('cycle_start')).strftime('%d %b') if payout.get('cycle_start') else 'N/A'} to {pd.to_datetime(payout.get('cycle_end')).strftime('%d %b') if payout.get('cycle_end') else 'N/A'}")
     y -= 25
-    p.drawString(50, y, f"Gross Volume: {format_inr(payout['total_gmv_inr'])}")
+    p.drawString(50, y, f"Gross Volume: {format_inr(payout.get('total_gmv_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Refunds Deducted: {format_inr(payout['total_refunds_inr'])}")
+    p.drawString(50, y, f"Refunds Deducted: {format_inr(payout.get('total_refunds_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Adjusted Gross: {format_inr(payout['adjusted_gross_inr'])}")
+    p.drawString(50, y, f"Adjusted Gross: {format_inr(payout.get('adjusted_gross_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Platform Commission: {format_inr(payout['platform_fee_inr'])}")
+    p.drawString(50, y, f"Platform Commission: {format_inr(payout.get('platform_fee_inr', 0))}")
     
     p.setFont("Helvetica-Bold", 16)
     y -= 40
-    p.drawString(50, y, f"NET PAYOUT TRANSFERRED: {format_inr(payout['creator_share_inr'])}")
+    p.drawString(50, y, f"NET PAYOUT TRANSFERRED: {format_inr(payout.get('creator_share_inr', 0))}")
     
     if fin_info:
         y -= 50
@@ -130,18 +130,15 @@ with tab_generate:
             ).eq('creator_id', creator_id).eq('is_settled', False).gte('created_at', start_iso).lte('created_at', end_iso))
             
             # ✅ FIX 2: Bulletproof Refund Fetching (Avoids PostgREST Join Errors)
-            # Step A: Fetch all refunds in this cycle
             cycle_refunds = fetch_all(lambda: supabase.table('refunds').select(
                 'amount_inr, payment_id'
             ).gte('created_at', start_iso).lte('created_at', end_iso))
             
-            # Step B: Get all payment IDs that belong to this creator
             creator_payments_res = fetch_all(lambda: supabase.table('payments').select(
                 'payment_id'
             ).eq('creator_id', creator_id))
             creator_payment_ids = set(p['payment_id'] for p in creator_payments_res)
             
-            # Step C: Filter refunds specifically for this creator in Python
             creator_refunds = [
                 r for r in cycle_refunds 
                 if r.get('payment_id') in creator_payment_ids
@@ -230,9 +227,27 @@ with tab_history:
         st.info("No payouts generated yet.")
     else:
         df_payouts = pd.DataFrame(payouts_data)
-        df_payouts['Creator'] = df_payouts['creators'].apply(lambda x: f"{x['creator_handle']} ({x['creator_code']})" if x else 'Unknown')
-        df_payouts['Payout Amount'] = df_payouts['creator_share_inr'].apply(format_inr)
-        df_payouts['Cycle'] = df_payouts.apply(lambda row: f"{pd.to_datetime(row['cycle_start']).strftime('%d %b')} - {pd.to_datetime(row['cycle_end']).strftime('%d %b')}", axis=1)
+        
+        # ✅ FIX 3: Safely handle 'creators' column whether it's a dict or missing
+        df_payouts['Creator'] = df_payouts['creators'].apply(
+            lambda x: f"{x['creator_handle']} ({x['creator_code']})" if isinstance(x, dict) and x else 'Unknown'
+        )
+        
+        # ✅ FIX 4: Safely handle 'creator_share_inr' in case of older records
+        df_payouts['Payout Amount'] = df_payouts.get('creator_share_inr', pd.Series([0]*len(df_payouts))).apply(format_inr)
+        
+        # ✅ FIX 5: Safely format Cycle dates, handling cases where columns might be missing
+        def get_cycle_str(row):
+            start = row.get('cycle_start')
+            end = row.get('cycle_end')
+            if start and end:
+                try:
+                    return f"{pd.to_datetime(start).strftime('%d %b')} - {pd.to_datetime(end).strftime('%d %b')}"
+                except Exception:
+                    return "N/A"
+            return "N/A"
+            
+        df_payouts['Cycle'] = df_payouts.apply(get_cycle_str, axis=1)
         df_payouts['Generated On'] = pd.to_datetime(df_payouts['created_at']).dt.strftime('%d %b %Y %H:%M')
         
         display_cols = ['Generated On', 'Creator', 'Cycle', 'Payout Amount', 'status', 'utr']
@@ -244,11 +259,11 @@ with tab_history:
         st.divider()
         st.markdown("### ✍️ Update Payout Status (Mark as Paid)")
         
-        pending_payouts = [p for p in payouts_data if p['status'] == 'PENDING']
+        pending_payouts = [p for p in payouts_data if p.get('status') == 'PENDING']
         if not pending_payouts:
             st.success("🎉 No pending payouts. All creators have been paid!")
         else:
-            pending_options = {f"{p['creators']['creator_handle']} - {format_inr(p['creator_share_inr'])} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p['id'] for p in pending_payouts}
+            pending_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p['id'] for p in pending_payouts}
             
             with st.form("update_status_form"):
                 c1, c2 = st.columns(2)
@@ -279,9 +294,9 @@ with tab_history:
         st.markdown("### 📄 Download Official Payout Receipts (PDF)")
         st.caption("Generate official PDF receipts for your records or to send to creators.")
         
-        paid_payouts = [p for p in payouts_data if p['status'] == 'PAID']
+        paid_payouts = [p for p in payouts_data if p.get('status') == 'PAID']
         if paid_payouts:
-            paid_options = {f"{p['creators']['creator_handle']} - {format_inr(p['creator_share_inr'])} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p for p in paid_payouts}
+            paid_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p for p in paid_payouts}
             
             sel_pdf_label = st.selectbox("Select Paid Payout", options=list(paid_options.keys()), key="pdf_sel")
             sel_pdf_payout = paid_options[sel_pdf_label]
@@ -297,7 +312,7 @@ with tab_history:
             st.download_button(
                 label="⬇️ Download PDF Receipt",
                 data=pdf_bytes,
-                file_name=f"StreamHeart_Payout_{sel_pdf_payout['creators']['creator_handle']}_{pd.to_datetime(sel_pdf_payout['created_at']).strftime('%Y%m%d')}.pdf",
+                file_name=f"StreamHeart_Payout_{c_data.get('creator_handle', 'Creator')}_{pd.to_datetime(sel_pdf_payout['created_at']).strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 width="stretch"
             )
@@ -307,7 +322,7 @@ with tab_history:
     st.caption("Use this ONLY if you generated a payout by mistake and haven't sent the money yet. This unlocks the payments so they can be recalculated.")
     
     if payouts_data:
-        rollback_options = {f"{p['creators']['creator_handle']} - {format_inr(p['creator_share_inr'])} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})": p['id'] for p in payouts_data}
+        rollback_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})": p['id'] for p in payouts_data}
         
         with st.form("rollback_form"):
             sel_rollback_label = st.selectbox("Select Payout to Rollback", options=list(rollback_options.keys()), key="rollback_sel")

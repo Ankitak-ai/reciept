@@ -12,14 +12,23 @@ st.set_page_config(page_title="Master Reconciliation", page_icon="📊", layout=
 st.title("📊 Master Ledger & Reconciliation")
 st.caption("A complete, all-time breakdown of your actual Razorpay earnings, fees, and payment methods from your Clean Ledger.")
 
-with st.spinner("Aggregating all-time ledger data..."):
-    # Fetch all payments
-    payments_res = supabase.table('payments').select('amount_inr, fee_inr, tax_inr, status, method, original_currency, original_amount').execute()
-    payments = payments_res.data or []
-    
-    # Fetch all refunds
-    refunds_res = supabase.table('refunds').select('amount_inr').execute()
-    refunds = refunds_res.data or []
+# ✅ FIX: Helper function to bypass Supabase's strict 1,000 row limit
+def fetch_all_rows(table_name, select_cols):
+    all_data = []
+    offset = 0
+    limit = 1000
+    while True:
+        res = supabase.table(table_name).select(select_cols).range(offset, offset + limit - 1).execute()
+        data = res.data or []
+        all_data.extend(data)
+        if len(data) < limit:
+            break
+        offset += limit
+    return all_data
+
+with st.spinner("Aggregating all-time ledger data (bypassing 1k row limit)..."):
+    payments = fetch_all_rows('payments', 'amount_inr, fee_inr, tax_inr, status, method, original_currency, original_amount')
+    refunds = fetch_all_rows('refunds', 'amount_inr')
 
 if not payments:
     st.warning("No payments found in the database. Run a Deep Sync first!")
@@ -31,12 +40,12 @@ failed = [p for p in payments if p.get('status') == 'failed']
 refunded_status = [p for p in payments if p.get('status') == 'refunded']
 
 # Financials (Captured only)
-gross_captured = sum(p.get('amount_inr', 0) for p in captured)
-total_fees = sum(p.get('fee_inr', 0) for p in captured)
-total_gst = sum(p.get('tax_inr', 0) for p in captured)
+gross_captured = sum(p.get('amount_inr', 0) or 0 for p in captured)
+total_fees = sum(p.get('fee_inr', 0) or 0 for p in captured)
+total_gst = sum(p.get('tax_inr', 0) or 0 for p in captured)
 total_fees_and_gst = total_fees + total_gst
 net_earnings = gross_captured - total_fees_and_gst
-amount_refunded = sum(r.get('amount_inr', 0) for r in refunds)
+amount_refunded = sum(r.get('amount_inr', 0) or 0 for r in refunds)
 
 # Methods & Currencies
 methods = Counter(p.get('method', 'unknown') for p in captured)
@@ -78,7 +87,7 @@ with col_stat2:
     # Pie chart for methods
     if sum(methods.values()) > 0:
         fig = px.pie(names=list(methods.keys()), values=list(methods.values()), title="Payment Methods Distribution", hole=0.4)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 st.divider()
-st.info("💡 **Why don't I see the 183 'failed' payments here?** Earlier, to protect your Payout Generator from accidentally paying creators for failed bank attempts, we configured your Edge Function to **ignore** failed payments and we deleted the old ones from the database. Your database now acts as a pure 'Clean Ledger' of actual money received. If you want to track failed attempts to monitor your Failure Rate, let me know and we can add a `failed_attempts` table!")
+st.info(f"💡 **Data Integrity Check:** Successfully loaded **{len(payments)} total payments** and **{len(refunds)} refunds** from the database. (Bypassed the 1,000 row API limit).")

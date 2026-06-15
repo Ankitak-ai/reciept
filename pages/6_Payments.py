@@ -23,17 +23,21 @@ st.markdown("### 🔄 Sync Controls")
 st.caption("Clicking this triggers our secure Edge Function to fetch and reconcile the last 2,000 payments and 1,000 refunds from Razorpay.")
 
 if st.button("🔄 Force Deep Sync", type="primary", width="stretch"):
-    # Get secrets
     function_url = st.secrets.get("BACKFILL_URL")
     secret_token = st.secrets.get("BACKFILL_SECRET")
+    anon_key = st.secrets.get("SUPABASE_ANON_KEY") # Needed to pass the Supabase Gateway
     
-    if not function_url or not secret_token:
-        st.error("Missing BACKFILL_URL or BACKFILL_SECRET in Streamlit secrets.")
+    if not function_url or not secret_token or not anon_key:
+        st.error("Missing BACKFILL_URL, BACKFILL_SECRET, or SUPABASE_ANON_KEY in Streamlit secrets.")
         st.stop()
         
     with st.spinner("Syncing from Edge Function... This may take up to a minute."):
         try:
-            headers = {"Authorization": f"Bearer {secret_token}"}
+            # ✅ FIX: Pass Anon Key to satisfy Gateway, custom secret in x-backfill-secret
+            headers = {
+                "Authorization": f"Bearer {anon_key}",
+                "x-backfill-secret": secret_token
+            }
             response = requests.post(function_url, headers=headers, timeout=120)
             
             if response.status_code == 200:

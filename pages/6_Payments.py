@@ -38,7 +38,7 @@ if st.button("🔄 Force Deep Sync", type="primary", width="stretch"):
                 "Authorization": f"Bearer {anon_key}",
                 "x-backfill-secret": secret_token
             }
-            response = requests.post(function_url, headers=headers, timeout=120)
+            response = requests.post(function_url, headers=headers, timeout=300)
             
             if response.status_code == 200:
                 result = response.json()

@@ -21,7 +21,7 @@ today_ist = datetime.datetime.now(IST).date()
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
 
-# ✅ NEW: Permanent Success Message (Persists across page reruns)
+# Permanent Success Message
 if 'last_sync_result' in st.session_state:
     res = st.session_state['last_sync_result']
     st.success(f"🎉 **Last Sync Complete:** Successfully synced **{res['payments']} payments** and **{res['refunds']} refunds** to the CMS database. (Completed at {res['time']})")
@@ -67,11 +67,15 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
                 synced_this_batch = result.get("payments_synced", 0)
                 refunds_this_batch = result.get("refunds_synced", 0)
                 
+                # ✅ THE FIX: Check total records processed by Razorpay, not just captured ones
+                processed_this_batch = result.get("processed_count", 0)
+                
                 total_synced += synced_this_batch
                 total_refunds += refunds_this_batch
                 
-                if synced_this_batch == 0:
-                    break # Reached the absolute end of Razorpay history
+                if processed_this_batch == 0:
+                    # This is the ONLY time we should break: Razorpay literally returned 0 items
+                    break 
                     
                 skip += batch_size
             else:
@@ -84,14 +88,14 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
             
     progress_bar.progress(100)
     
-    # ✅ NEW: Save to session state so it persists after the page refreshes
+    # Save to session state so it persists after the page refreshes
     st.session_state['last_sync_result'] = {
         "payments": total_synced,
         "refunds": total_refunds,
         "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
     }
     st.balloons()
-    st.rerun() # This refreshes the ledger tables below, but the banner stays!
+    st.rerun() 
 
 st.divider()
 

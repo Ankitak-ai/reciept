@@ -18,15 +18,15 @@ IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
 # ==============================================================================
-# 1. MANUAL SYNC FALLBACK
+# 1. MANUAL SYNC FALLBACK (WITH PAGINATION & CACHING)
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
-st.caption("Webhooks handle real-time syncing automatically. Use this only as a fallback or to backfill historical data.")
+st.caption("Webhooks handle real-time syncing. Use this to backfill your entire historical ledger from Razorpay.")
 
 col1, col2 = st.columns([1, 3])
 with col1:
-    if st.button("🔄 Force Manual Sync", type="primary", width="stretch"):
-        with st.spinner("Triggering background sync... This may take a minute."):
+    if st.button("🔄 Force Deep Sync", type="primary", width="stretch"):
+        with st.spinner("Connecting to Razorpay..."):
             try:
                 rzp_key_id = st.secrets.get("RAZORPAY_KEY_ID")
                 rzp_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
@@ -38,52 +38,85 @@ with col1:
                 auth_header = base64.b64encode(f"{rzp_key_id}:{rzp_key_secret}".encode()).decode()
                 headers = {"Authorization": f"Basic {auth_header}"}
                 
-                # Fetch Payments
-                url = "https://api.razorpay.com/v1/payments?count=100"
-                response = requests.get(url, headers=headers)
+                # ✅ OPTIMIZATION: Pre-load existing DB records to skip expensive API calls
+                existing_res = supabase.table('payments').select('payment_id, creator_id').limit(10000).execute()
+                existing_map = {p['payment_id']: p['creator_id'] for p in (existing_res.data or [])}
                 
-                json_res = response.json()
-                rzp_payments = json_res.get('items', []) if isinstance(json_res, dict) else (json_res if isinstance(json_res, list) else [])
+                # ✅ PAGINATION: Fetch up to 2000 historical payments in batches of 100
+                all_rzp_payments = []
+                skip = 0
+                batch_size = 100
+                max_to_fetch = 2000 
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                while skip < max_to_fetch:
+                    status_text.text(f"Downloading batch from Razorpay... ({len(all_rzp_payments)} payments fetched)")
+                    url = f"https://api.razorpay.com/v1/payments?count={batch_size}&skip={skip}"
+                    response = requests.get(url, headers=headers)
+                    
+                    json_res = response.json()
+                    batch = json_res.get('items', []) if isinstance(json_res, dict) else []
+                    
+                    if not batch:
+                        break # Reached the end of Razorpay history
+                        
+                    all_rzp_payments.extend(batch)
+                    skip += batch_size
+                    progress_bar.progress(min(skip / max_to_fetch, 1.0))
+                    time.sleep(0.1) # Prevent Razorpay rate limits
+                    
+                    if len(batch) < batch_size:
+                        break # Last batch was smaller than 100, meaning we hit the end
+                        
+                progress_bar.progress(1.0)
+                status_text.text(f"✅ Downloaded {len(all_rzp_payments)} payments. Processing and mapping...")
                 
                 synced_count = 0
-                for p in rzp_payments:
-                    # ✅ CRITICAL FIX: Only sync payments that were actually captured (money in bank).
-                    # Ignore 'failed', 'created', or 'pending' statuses.
+                skipped_count = 0
+                
+                for p in all_rzp_payments:
                     if p.get('status') != 'captured':
                         continue
                         
-                    receipt = ''
+                    pay_id = p['id']
                     order_id = p.get('order_id')
-                    
-                    # Razorpay attaches the receipt to the ORDER, not the Payment.
-                    if order_id:
-                        try:
-                            order_url = f"https://api.razorpay.com/v1/orders/{order_id}"
-                            order_res = requests.get(order_url, headers=headers)
-                            if order_res.status_code == 200:
-                                order_data = order_res.json()
-                                receipt = order_data.get('receipt', '')
-                        except Exception:
-                            pass
-                            
-                    if not receipt:
-                        notes = p.get('notes')
-                        if isinstance(notes, dict):
-                            receipt = notes.get('receipt', '')
-                            
-                    creator_code = receipt.split('_')[0] if receipt else None
-                    
                     creator_id = None
-                    if creator_code:
-                        try:
-                            creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).limit(1).execute()
-                            if creator_res and creator_res.data and len(creator_res.data) > 0:
-                                creator_id = creator_res.data[0]['id']
-                        except Exception:
-                            pass
-                            
+                    
+                    # ✅ SMART CACHING: If we already mapped this payment in the DB, skip the Order API call
+                    if pay_id in existing_map and existing_map[pay_id] is not None:
+                        creator_id = existing_map[pay_id]
+                    else:
+                        # New or unmapped payment. Fetch the order to get the receipt.
+                        receipt = ''
+                        if order_id:
+                            try:
+                                order_url = f"https://api.razorpay.com/v1/orders/{order_id}"
+                                order_res = requests.get(order_url, headers=headers)
+                                if order_res.status_code == 200:
+                                    order_data = order_res.json()
+                                    receipt = order_data.get('receipt', '')
+                            except Exception:
+                                pass
+                                
+                        if not receipt:
+                            notes = p.get('notes')
+                            if isinstance(notes, dict):
+                                receipt = notes.get('receipt', '')
+                                
+                        creator_code = receipt.split('_')[0] if receipt else None
+                        
+                        if creator_code:
+                            try:
+                                creator_res = supabase.table('creators').select('id').eq('creator_code', creator_code).limit(1).execute()
+                                if creator_res and creator_res.data and len(creator_res.data) > 0:
+                                    creator_id = creator_res.data[0]['id']
+                            except Exception:
+                                pass
+                                
                     supabase.table('payments').upsert({
-                        "payment_id": p['id'],
+                        "payment_id": pay_id,
                         "order_id": order_id,
                         "amount_inr": p['amount'],
                         "fee_inr": p.get('fee', 0),
@@ -98,14 +131,21 @@ with col1:
                     }, on_conflict='payment_id').execute()
                     synced_count += 1
                     
-                # Fetch Refunds
-                ref_url = "https://api.razorpay.com/v1/refunds?count=100"
-                ref_response = requests.get(ref_url, headers=headers)
+                # Fetch Refunds (Pagination for refunds too)
+                all_rzp_refunds = []
+                skip_ref = 0
+                while skip_ref < 1000:
+                    ref_url = f"https://api.razorpay.com/v1/refunds?count=100&skip={skip_ref}"
+                    ref_response = requests.get(ref_url, headers=headers)
+                    ref_json = ref_response.json()
+                    ref_batch = ref_json.get('items', []) if isinstance(ref_json, dict) else []
+                    if not ref_batch: break
+                    all_rzp_refunds.extend(ref_batch)
+                    skip_ref += 100
+                    if len(ref_batch) < 100: break
+                    time.sleep(0.1)
                 
-                ref_json = ref_response.json()
-                rzp_refunds = ref_json.get('items', []) if isinstance(ref_json, dict) else (ref_json if isinstance(ref_json, list) else [])
-                
-                for r in rzp_refunds:
+                for r in all_rzp_refunds:
                     supabase.table('refunds').upsert({
                         "refund_id": r['id'],
                         "payment_id": r['payment_id'],
@@ -115,7 +155,7 @@ with col1:
                         "created_at": pd.to_datetime(r['created_at'], unit='s').isoformat()
                     }, on_conflict='refund_id').execute()
                     
-                st.success(f"✅ Successfully synced {synced_count} successful payments and {len(rzp_refunds)} refunds!")
+                st.success(f"✅ Successfully synced {synced_count} successful payments and {len(all_rzp_refunds)} refunds!")
                 time.sleep(1)
                 st.rerun()
                 

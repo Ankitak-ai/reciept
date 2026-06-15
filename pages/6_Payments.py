@@ -20,6 +20,15 @@ today_ist = datetime.datetime.now(IST).date()
 # 1. SYNC CONTROLS (SMART ORCHESTRATOR)
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
+
+# ✅ NEW: Permanent Success Message (Persists across page reruns)
+if 'last_sync_result' in st.session_state:
+    res = st.session_state['last_sync_result']
+    st.success(f"🎉 **Last Sync Complete:** Successfully synced **{res['payments']} payments** and **{res['refunds']} refunds** to the CMS database. (Completed at {res['time']})")
+    if st.button("Dismiss", key="dismiss_sync"):
+        del st.session_state['last_sync_result']
+        st.rerun()
+
 st.caption("Clicking this will automatically download your entire Razorpay history in chunks. No limits, no local scripts required.")
 
 if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
@@ -74,10 +83,15 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
             break
             
     progress_bar.progress(100)
-    st.success(f"🎉 **Complete!** Successfully synced **{total_synced} payments** and **{total_refunds} refunds** to the CMS database.")
+    
+    # ✅ NEW: Save to session state so it persists after the page refreshes
+    st.session_state['last_sync_result'] = {
+        "payments": total_synced,
+        "refunds": total_refunds,
+        "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
+    }
     st.balloons()
-    time.sleep(2)
-    st.rerun()
+    st.rerun() # This refreshes the ledger tables below, but the banner stays!
 
 st.divider()
 

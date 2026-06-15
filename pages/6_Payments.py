@@ -17,38 +17,67 @@ IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
 # ==============================================================================
-# 1. SYNC CONTROLS (TRIGGERS EDGE FUNCTION BACKFILL)
+# 1. SYNC CONTROLS (SMART ORCHESTRATOR)
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
-st.caption("Clicking this triggers our secure Edge Function to fetch and reconcile the last 2,000 payments and 1,000 refunds from Razorpay.")
+st.caption("Clicking this will automatically download your entire Razorpay history in chunks. No limits, no local scripts required.")
 
-if st.button("🔄 Force Deep Sync", type="primary", width="stretch"):
+if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
     function_url = st.secrets.get("BACKFILL_URL")
     secret_token = st.secrets.get("BACKFILL_SECRET")
-    anon_key = st.secrets.get("SUPABASE_ANON_KEY") # Needed to pass the Supabase Gateway
+    anon_key = st.secrets.get("SUPABASE_ANON_KEY")
     
     if not function_url or not secret_token or not anon_key:
         st.error("Missing BACKFILL_URL, BACKFILL_SECRET, or SUPABASE_ANON_KEY in Streamlit secrets.")
         st.stop()
         
-    with st.spinner("Syncing from Edge Function... This may take up to a minute."):
+    headers = {
+        "Authorization": f"Bearer {anon_key}",
+        "x-backfill-secret": secret_token,
+        "Content-Type": "application/json"
+    }
+    
+    skip = 0
+    batch_size = 500
+    total_synced = 0
+    total_refunds = 0
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    while True:
+        status_text.info(f"⏳ **Working...** Fetching batch starting at record **{skip}**. Total synced so far: **{total_synced}**")
+        
+        payload = {"skip": skip, "limit": batch_size}
+        
         try:
-            # ✅ FIX: Pass Anon Key to satisfy Gateway, custom secret in x-backfill-secret
-            headers = {
-                "Authorization": f"Bearer {anon_key}",
-                "x-backfill-secret": secret_token
-            }
-            response = requests.post(function_url, headers=headers, timeout=300)
+            response = requests.post(function_url, headers=headers, json=payload, timeout=90)
             
             if response.status_code == 200:
                 result = response.json()
-                st.success(f"✅ Successfully synced **{result.get('payments_synced', 0)} payments** and **{result.get('refunds_synced', 0)} refunds**!")
-                time.sleep(1.5)
-                st.rerun()
+                synced_this_batch = result.get("payments_synced", 0)
+                refunds_this_batch = result.get("refunds_synced", 0)
+                
+                total_synced += synced_this_batch
+                total_refunds += refunds_this_batch
+                
+                if synced_this_batch == 0:
+                    break # Reached the absolute end of Razorpay history
+                    
+                skip += batch_size
             else:
-                st.error(f"Edge Function failed ({response.status_code}): {response.text}")
+                st.error(f"Server error at record {skip}: {response.text}")
+                break
+                
         except Exception as e:
-            st.error(f"Sync failed: {e}")
+            st.error(f"Connection failed at record {skip}: {e}")
+            break
+            
+    progress_bar.progress(100)
+    st.success(f"🎉 **Complete!** Successfully synced **{total_synced} payments** and **{total_refunds} refunds** to the CMS database.")
+    st.balloons()
+    time.sleep(2)
+    st.rerun()
 
 st.divider()
 

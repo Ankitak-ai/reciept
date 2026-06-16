@@ -36,8 +36,8 @@ def generate_payout_pdf(payout, creator, fin_info):
     
     p.setFont("Helvetica-Bold", 14)
     p.drawString(50, height - 120, f"Creator: {creator.get('creator_handle', 'N/A')}")
-    p.drawString(50, height - 140, f"Payout ID: {payout['id'][:8]}...")
-    p.drawString(50, height - 160, f"Generated: {pd.to_datetime(payout['created_at']).strftime('%d %b %Y')}")
+    p.drawString(50, height - 140, f"Payout ID: {payout.get('id', 'N/A')[:8]}...")
+    p.drawString(50, height - 160, f"Generated: {pd.to_datetime(payout.get('created_at')).strftime('%d %b %Y') if payout.get('created_at') else 'N/A'}")
     
     p.setFont("Helvetica", 12)
     y = height - 200
@@ -228,15 +228,27 @@ with tab_history:
     else:
         df_payouts = pd.DataFrame(payouts_data)
         
-        # ✅ FIX 3: Safely handle 'creators' column whether it's a dict or missing
-        df_payouts['Creator'] = df_payouts['creators'].apply(
-            lambda x: f"{x['creator_handle']} ({x['creator_code']})" if isinstance(x, dict) and x else 'Unknown'
-        )
+        # ✅ FIX 3: ULTIMATE SAFETY - Ensure all expected columns exist to prevent KeyError
+        if 'status' not in df_payouts.columns:
+            df_payouts['status'] = 'UNKNOWN'
+        if 'utr' not in df_payouts.columns:
+            df_payouts['utr'] = 'N/A'
+        if 'creator_share_inr' not in df_payouts.columns:
+            df_payouts['creator_share_inr'] = 0
+        if 'created_at' not in df_payouts.columns:
+            df_payouts['created_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            
+        # Safely extract Creator info
+        def get_creator_name(x):
+            if isinstance(x, dict) and x:
+                handle = x.get('creator_handle', 'Unknown')
+                code = x.get('creator_code', '?')
+                return f"{handle} ({code})"
+            return 'Unknown'
+            
+        df_payouts['Creator'] = df_payouts.get('creators', pd.Series([None]*len(df_payouts))).apply(get_creator_name)
+        df_payouts['Payout Amount'] = df_payouts['creator_share_inr'].apply(format_inr)
         
-        # ✅ FIX 4: Safely handle 'creator_share_inr' in case of older records
-        df_payouts['Payout Amount'] = df_payouts.get('creator_share_inr', pd.Series([0]*len(df_payouts))).apply(format_inr)
-        
-        # ✅ FIX 5: Safely format Cycle dates, handling cases where columns might be missing
         def get_cycle_str(row):
             start = row.get('cycle_start')
             end = row.get('cycle_end')
@@ -251,8 +263,11 @@ with tab_history:
         df_payouts['Generated On'] = pd.to_datetime(df_payouts['created_at']).dt.strftime('%d %b %Y %H:%M')
         
         display_cols = ['Generated On', 'Creator', 'Cycle', 'Payout Amount', 'status', 'utr']
-        st.dataframe(df_payouts[display_cols], width="stretch", hide_index=True, column_config={
-            "status": st.column_config.SelectboxColumn("Status", options=["PENDING", "PAID", "FAILED"]),
+        # ✅ FIX 4: Only keep columns that actually exist in the dataframe
+        safe_display_cols = [col for col in display_cols if col in df_payouts.columns]
+        
+        st.dataframe(df_payouts[safe_display_cols], width="stretch", hide_index=True, column_config={
+            "status": st.column_config.SelectboxColumn("Status", options=["PENDING", "PAID", "FAILED", "UNKNOWN"]),
             "utr": st.column_config.TextColumn("UTR / Ref Number")
         })
         
@@ -263,7 +278,7 @@ with tab_history:
         if not pending_payouts:
             st.success("🎉 No pending payouts. All creators have been paid!")
         else:
-            pending_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p['id'] for p in pending_payouts}
+            pending_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p['id'] for p in pending_payouts}
             
             with st.form("update_status_form"):
                 c1, c2 = st.columns(2)
@@ -296,7 +311,7 @@ with tab_history:
         
         paid_payouts = [p for p in payouts_data if p.get('status') == 'PAID']
         if paid_payouts:
-            paid_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p for p in paid_payouts}
+            paid_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p for p in paid_payouts}
             
             sel_pdf_label = st.selectbox("Select Paid Payout", options=list(paid_options.keys()), key="pdf_sel")
             sel_pdf_payout = paid_options[sel_pdf_label]
@@ -322,7 +337,7 @@ with tab_history:
     st.caption("Use this ONLY if you generated a payout by mistake and haven't sent the money yet. This unlocks the payments so they can be recalculated.")
     
     if payouts_data:
-        rollback_options = {f"{p['creators']['creator_handle'] if isinstance(p.get('creators'), dict) else 'Unknown'} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})": p['id'] for p in payouts_data}
+        rollback_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})": p['id'] for p in payouts_data}
         
         with st.form("rollback_form"):
             sel_rollback_label = st.selectbox("Select Payout to Rollback", options=list(rollback_options.keys()), key="rollback_sel")

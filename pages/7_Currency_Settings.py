@@ -8,50 +8,59 @@ require_auth()
 
 st.set_page_config(page_title="Currency Settings", page_icon="💱", layout="wide")
 st.title("💱 Currency & Exchange Rate Settings")
-st.caption("Manage supported currencies and their exchange rates relative to INR (Base Currency).")
 
 # ==============================================================================
-# 1. SAFE DATA FETCHING
+# 1. AGGRESSIVE DEBUG & DATA FETCHING
 # ==============================================================================
-with st.spinner("Loading currency settings..."):
-    try:
-        # Fetch all currency rates
-        res = supabase.table('currency_rates').select('*').order('currency_code').execute()
-        data = res.data or []
-    except Exception as e:
-        st.error(f"Failed to fetch currency data: {e}")
-        data = []
+st.markdown("### 🔍 System Debug")
+df_rates = pd.DataFrame()
+table_used = ""
 
-# ==============================================================================
-# 2. BULLETPROOF DATAFRAME & COLUMN HANDLING
-# ==============================================================================
-# ✅ FIX: Only create DataFrame if data actually exists, preventing empty column errors
-if data and len(data) > 0:
-    df_rates = pd.DataFrame(data)
+try:
+    # Attempt 1: Try 'currency_rates'
+    res1 = supabase.table('currency_rates').select('*').execute()
+    st.write(f"📡 Query to 'currency_rates' returned: **{len(res1.data) if res1.data else 0} rows**")
     
-    # Safely identify the exact column names from your database schema
-    code_col = 'currency_code' if 'currency_code' in df_rates.columns else 'code'
-    rate_col = 'rate_to_inr' if 'rate_to_inr' in df_rates.columns else 'exchange_rate_to_inr'
-    
-    if code_col in df_rates.columns:
-        # Drop NaNs and get unique values to prevent errors
-        currency_options = ["None"] + df_rates[code_col].dropna().astype(str).unique().tolist()
+    if res1.data and len(res1.data) > 0:
+        df_rates = pd.DataFrame(res1.data)
+        table_used = "currency_rates"
+        st.success("✅ Successfully found data in 'currency_rates'!")
     else:
-        currency_options = ["None", "USD", "INR", "EUR", "GBP", "CAD", "AUD", "PHP", "AED"]
-else:
-    # Fallback if the table is completely empty or query failed
-    currency_options = ["None", "USD", "INR", "EUR", "GBP", "CAD", "AUD", "PHP", "AED"]
-    df_rates = pd.DataFrame(columns=['currency_code', 'rate_to_inr', 'updated_at'])
+        # Attempt 2: Try 'currencies' just in case the name is different
+        st.info("Trying fallback table name 'currencies'...")
+        res2 = supabase.table('currencies').select('*').execute()
+        st.write(f"📡 Query to 'currencies' returned: **{len(res2.data) if res2.data else 0} rows**")
+        
+        if res2.data and len(res2.data) > 0:
+            df_rates = pd.DataFrame(res2.data)
+            table_used = "currencies"
+            st.success("✅ Successfully found data in 'currencies'!")
+        else:
+            st.error("⚠️ **CRITICAL:** Both tables returned 0 rows. This means either the table is empty, the name is different, or RLS is blocking the 'anon' key.")
+            
+except Exception as e:
+    st.error(f"❌ Database query failed completely: {e}")
+
+st.divider()
 
 # ==============================================================================
-# 3. UI: VIEW CURRENT RATES
+# 2. BULLETPROOF UI RENDERING
 # ==============================================================================
 st.markdown("### 📊 Current Exchange Rates")
 
-if df_rates.empty or 'currency_code' not in df_rates.columns:
-    st.info("No currency rates configured yet. Add your first currency below!")
+if df_rates.empty:
+    st.warning("No currency data could be loaded. Please check the Debug info above.")
 else:
-    # Safely format the display dataframe
+    # Show a snippet of the raw data so we know it's working
+    with st.expander("View Raw Data Loaded"):
+        st.json(df_rates.head(2).to_dict(orient="records"))
+
+    # Safely identify the exact column names from your database schema
+    code_col = 'currency_code' if 'currency_code' in df_rates.columns else ('code' if 'code' in df_rates.columns else 'currency')
+    rate_col = 'rate_to_inr' if 'rate_to_inr' in df_rates.columns else ('exchange_rate_to_inr' if 'exchange_rate_to_inr' in df_rates.columns else 'rate')
+    
+    st.markdown(f"*(Detected columns: Code=`{code_col}`, Rate=`{rate_col}`)*")
+
     display_df = df_rates.copy()
     
     # Ensure required columns exist for display
@@ -62,21 +71,20 @@ else:
         lambda x: f"₹{float(x):,.2f}" if pd.notnull(x) else "N/A"
     )
     
+    cols_to_show = [code_col, 'Rate (1 Foreign = X INR)']
+    if 'updated_at' in display_df.columns:
+        cols_to_show.append('updated_at')
+        
     st.dataframe(
-        display_df[['currency_code', 'Rate (1 Foreign = X INR)', 'updated_at']], 
+        display_df[cols_to_show], 
         width="stretch", 
-        hide_index=True,
-        column_config={
-            "currency_code": st.column_config.TextColumn("Currency", width="small"),
-            "Rate (1 Foreign = X INR)": st.column_config.TextColumn("Exchange Rate", width="medium"),
-            "updated_at": st.column_config.DatetimeColumn("Last Updated", width="medium")
-        }
+        hide_index=True
     )
 
 st.divider()
 
 # ==============================================================================
-# 4. UI: ADD / EDIT CURRENCY
+# 3. UI: ADD / EDIT CURRENCY
 # ==============================================================================
 st.markdown("### ⚙️ Manage Currencies")
 
@@ -94,27 +102,35 @@ with tab_add:
         
         if submitted_add:
             if not new_code:
-                st.error("Currency code is required (e.g., USD).")
-            elif 'currency_code' in df_rates.columns and new_code in df_rates['currency_code'].astype(str).values:
-                st.error(f"Currency '{new_code}' already exists. Please edit it instead.")
+                st.error("Currency code is required.")
+            elif not df_rates.empty and code_col in df_rates.columns and new_code in df_rates[code_col].astype(str).values:
+                st.error(f"Currency '{new_code}' already exists.")
             else:
                 try:
-                    supabase.table('currency_rates').insert({
+                    # Use the table name that actually worked
+                    target_table = table_used if table_used else 'currency_rates'
+                    
+                    insert_data = {
                         "currency_code": new_code,
                         "rate_to_inr": float(new_rate),
                         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    }).execute()
+                    }
+                    
+                    # If the working table was 'currencies', adapt the keys
+                    if target_table == 'currencies' and 'currency_code' not in df_rates.columns:
+                        insert_data = {"code": new_code, "rate": float(new_rate)}
+
+                    supabase.table(target_table).insert(insert_data).execute()
                     st.success(f"✅ Currency '{new_code}' added successfully!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to add currency: {e}")
 
 with tab_edit:
-    if df_rates.empty or 'currency_code' not in df_rates.columns:
+    if df_rates.empty or code_col not in df_rates.columns:
         st.warning("No currencies available to edit.")
     else:
-        # Safely get the list of existing codes for the selectbox
-        existing_codes = df_rates['currency_code'].dropna().astype(str).unique().tolist()
+        existing_codes = df_rates[code_col].dropna().astype(str).unique().tolist()
         
         if not existing_codes:
             st.warning("No valid currency codes found to edit.")
@@ -122,8 +138,7 @@ with tab_edit:
             with st.form("edit_currency_form"):
                 sel_code = st.selectbox("Select Currency to Edit", options=existing_codes)
                 
-                # Get current values safely
-                current_row = df_rates[df_rates['currency_code'] == sel_code].iloc[0]
+                current_row = df_rates[df_rates[code_col] == sel_code].iloc[0]
                 current_rate = float(current_row.get(rate_col, 1.0))
                 
                 c1, c2 = st.columns(2)
@@ -134,10 +149,17 @@ with tab_edit:
                 
                 if submitted_edit:
                     try:
-                        supabase.table('currency_rates').update({
+                        target_table = table_used if table_used else 'currency_rates'
+                        
+                        update_data = {
                             "rate_to_inr": float(edit_rate),
                             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        }).eq('currency_code', sel_code).execute()
+                        }
+                        
+                        if target_table == 'currencies' and rate_col != 'rate_to_inr':
+                            update_data = {"rate": float(edit_rate)}
+
+                        supabase.table(target_table).update(update_data).eq(code_col, sel_code).execute()
                         
                         st.success(f"✅ Currency '{sel_code}' updated successfully!")
                         st.rerun()

@@ -17,21 +17,32 @@ IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
 # ==============================================================================
-# 1. SYNC CONTROLS (SMART ORCHESTRATOR)
+# 1. SYNC CONTROLS (SMART INCREMENTAL ORCHESTRATOR)
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
 
 # Permanent Success Message
 if 'last_sync_result' in st.session_state:
     res = st.session_state['last_sync_result']
-    st.success(f"🎉 **Last Sync Complete:** Successfully synced **{res['payments']} payments** and **{res['refunds']} refunds** to the CMS database. (Completed at {res['time']})")
+    st.success(f"🎉 **Last Sync Complete:** Successfully synced **{res['payments']} new payments** and **{res['refunds']} refunds**. (Completed at {res['time']})")
     if st.button("Dismiss", key="dismiss_sync"):
         del st.session_state['last_sync_result']
         st.rerun()
 
-st.caption("Clicking this will automatically download your entire Razorpay history in chunks. No limits, no local scripts required.")
+# Check latest record in DB to enable incremental sync
+latest_res = supabase.table('payments').select('created_at').order('created_at', desc=True).limit(1).execute()
+from_timestamp = 0
+last_sync_str = "Beginning of time"
 
-if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
+if latest_res.data and len(latest_res.data) > 0:
+    # Parse the ISO string and convert to UNIX timestamp (seconds)
+    last_sync_dt = datetime.datetime.fromisoformat(latest_res.data[0]['created_at'].replace('Z', '+00:00'))
+    from_timestamp = int(last_sync_dt.timestamp())
+    last_sync_str = last_sync_dt.strftime('%d %b %Y %H:%M IST')
+
+st.caption(f"💡 **Smart Sync:** Your database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data to save time.")
+
+if st.button("🔄 Sync New & Missing Data", type="primary", width="stretch"):
     function_url = st.secrets.get("BACKFILL_URL")
     secret_token = st.secrets.get("BACKFILL_SECRET")
     anon_key = st.secrets.get("SUPABASE_ANON_KEY")
@@ -55,9 +66,10 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
     status_text = st.empty()
     
     while True:
-        status_text.info(f"⏳ **Working...** Fetching batch starting at record **{skip}**. Total synced so far: **{total_synced}**")
+        status_text.info(f"⏳ **Working...** Fetching new batch starting at skip **{skip}**. Total new synced: **{total_synced}**")
         
-        payload = {"skip": skip, "limit": batch_size}
+        # ✅ FIX: Pass the from_timestamp so Razorpay only returns NEW records
+        payload = {"skip": skip, "limit": batch_size, "from_timestamp": from_timestamp}
         
         try:
             response = requests.post(function_url, headers=headers, json=payload, timeout=90)
@@ -66,24 +78,21 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
                 result = response.json()
                 synced_this_batch = result.get("payments_synced", 0)
                 refunds_this_batch = result.get("refunds_synced", 0)
-                
-                # ✅ THE FIX: Check total records processed by Razorpay, not just captured ones
                 processed_this_batch = result.get("processed_count", 0)
                 
                 total_synced += synced_this_batch
                 total_refunds += refunds_this_batch
                 
                 if processed_this_batch == 0:
-                    # This is the ONLY time we should break: Razorpay literally returned 0 items
-                    break 
+                    break # Razorpay returned 0 items, we have reached the absolute end
                     
                 skip += batch_size
             else:
-                st.error(f"Server error at record {skip}: {response.text}")
+                st.error(f"Server error at skip {skip}: {response.text}")
                 break
                 
         except Exception as e:
-            st.error(f"Connection failed at record {skip}: {e}")
+            st.error(f"Connection failed at skip {skip}: {e}")
             break
             
     progress_bar.progress(100)
@@ -94,7 +103,12 @@ if st.button("🔄 Sync ALL Historical Data", type="primary", width="stretch"):
         "refunds": total_refunds,
         "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
     }
-    st.balloons()
+    
+    if total_synced == 0 and total_refunds == 0:
+        st.info("✅ Database is already 100% up to date! No new payments found.")
+    else:
+        st.balloons()
+        
     st.rerun() 
 
 st.divider()

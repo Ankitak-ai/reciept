@@ -17,99 +17,99 @@ IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
 # ==============================================================================
-# 1. SYNC CONTROLS (SMART INCREMENTAL ORCHESTRATOR)
+# 1. SYNC CONTROLS
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
 
-# Permanent Success Message
 if 'last_sync_result' in st.session_state:
     res = st.session_state['last_sync_result']
-    st.success(f"🎉 **Last Sync Complete:** Successfully synced **{res['payments']} new payments** and **{res['refunds']} refunds**. (Completed at {res['time']})")
+    st.success(f"🎉 **Last Sync Complete:** {res['message']} (Completed at {res['time']})")
     if st.button("Dismiss", key="dismiss_sync"):
         del st.session_state['last_sync_result']
         st.rerun()
 
-# Check latest record in DB to enable incremental sync
+# Check latest record for incremental sync
 latest_res = supabase.table('payments').select('created_at').order('created_at', desc=True).limit(1).execute()
 from_timestamp = 0
 last_sync_str = "Beginning of time"
 
 if latest_res.data and len(latest_res.data) > 0:
-    # Parse the ISO string and convert to UNIX timestamp (seconds)
     last_sync_dt = datetime.datetime.fromisoformat(latest_res.data[0]['created_at'].replace('Z', '+00:00'))
     from_timestamp = int(last_sync_dt.timestamp())
     last_sync_str = last_sync_dt.strftime('%d %b %Y %H:%M IST')
 
-st.caption(f"💡 **Smart Sync:** Your database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data to save time.")
+st.caption(f"💡 **Smart Sync:** Database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data.")
 
-if st.button("🔄 Sync New & Missing Data", type="primary", width="stretch"):
-    function_url = st.secrets.get("BACKFILL_URL")
-    secret_token = st.secrets.get("BACKFILL_SECRET")
-    anon_key = st.secrets.get("SUPABASE_ANON_KEY")
-    
-    if not function_url or not secret_token or not anon_key:
-        st.error("Missing BACKFILL_URL, BACKFILL_SECRET, or SUPABASE_ANON_KEY in Streamlit secrets.")
-        st.stop()
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("🔄 Sync New & Missing Data", type="primary", width="stretch"):
+        function_url = st.secrets.get("BACKFILL_URL")
+        secret_token = st.secrets.get("BACKFILL_SECRET")
+        anon_key = st.secrets.get("SUPABASE_ANON_KEY")
         
-    headers = {
-        "Authorization": f"Bearer {anon_key}",
-        "x-backfill-secret": secret_token,
-        "Content-Type": "application/json"
-    }
-    
-    skip = 0
-    batch_size = 500
-    total_synced = 0
-    total_refunds = 0
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    while True:
-        status_text.info(f"⏳ **Working...** Fetching new batch starting at skip **{skip}**. Total new synced: **{total_synced}**")
-        
-        # ✅ FIX: Pass the from_timestamp so Razorpay only returns NEW records
-        payload = {"skip": skip, "limit": batch_size, "from_timestamp": from_timestamp}
-        
-        try:
-            response = requests.post(function_url, headers=headers, json=payload, timeout=90)
+        if not function_url or not secret_token or not anon_key:
+            st.error("Missing secrets.")
+            st.stop()
             
-            if response.status_code == 200:
-                result = response.json()
-                synced_this_batch = result.get("payments_synced", 0)
-                refunds_this_batch = result.get("refunds_synced", 0)
-                processed_this_batch = result.get("processed_count", 0)
-                
-                total_synced += synced_this_batch
-                total_refunds += refunds_this_batch
-                
-                if processed_this_batch == 0:
-                    break # Razorpay returned 0 items, we have reached the absolute end
-                    
-                skip += batch_size
-            else:
-                st.error(f"Server error at skip {skip}: {response.text}")
+        headers = {"Authorization": f"Bearer {anon_key}", "x-backfill-secret": secret_token, "Content-Type": "application/json"}
+        
+        skip = 0
+        batch_size = 500
+        total_synced = 0
+        total_refunds = 0
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        while True:
+            status_text.info(f"⏳ Fetching batch... Total new synced: {total_synced}")
+            payload = {"skip": skip, "limit": batch_size, "from_timestamp": from_timestamp}
+            
+            try:
+                response = requests.post(function_url, headers=headers, json=payload, timeout=90)
+                if response.status_code == 200:
+                    result = response.json()
+                    total_synced += result.get("payments_synced", 0)
+                    total_refunds += result.get("refunds_synced", 0)
+                    if result.get("processed_count", 0) == 0: break
+                    skip += batch_size
+                else:
+                    st.error(f"Server error: {response.text}")
+                    break
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
                 break
                 
-        except Exception as e:
-            st.error(f"Connection failed at skip {skip}: {e}")
-            break
-            
-    progress_bar.progress(100)
-    
-    # Save to session state so it persists after the page refreshes
-    st.session_state['last_sync_result'] = {
-        "payments": total_synced,
-        "refunds": total_refunds,
-        "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
-    }
-    
-    if total_synced == 0 and total_refunds == 0:
-        st.info("✅ Database is already 100% up to date! No new payments found.")
-    else:
-        st.balloons()
+        progress_bar.progress(100)
+        msg = f"Synced {total_synced} new payments and {total_refunds} refunds." if total_synced > 0 else "Database is already 100% up to date!"
+        st.session_state['last_sync_result'] = {"message": msg, "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")}
+        if total_synced > 0: st.balloons()
+        st.rerun()
+
+with col2:
+    if st.button("🔗 Auto-Remap Unmapped Payments", type="secondary", width="stretch"):
+        function_url = st.secrets.get("BACKFILL_URL").replace('/backfill', '/auto-remap')
+        secret_token = st.secrets.get("BACKFILL_SECRET")
+        anon_key = st.secrets.get("SUPABASE_ANON_KEY")
         
-    st.rerun() 
+        headers = {"Authorization": f"Bearer {anon_key}", "x-backfill-secret": secret_token}
+        
+        with st.spinner("Scanning unmapped payments and fetching Razorpay orders..."):
+            try:
+                response = requests.post(function_url, headers=headers, timeout=120)
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state['last_sync_result'] = {
+                        "message": result.get('message', 'Auto-remap complete.'), 
+                        "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
+                    }
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error(f"Auto-remap failed: {response.text}")
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
 
 st.divider()
 
@@ -148,60 +148,18 @@ else:
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Gross (Last 100)", format_inr(total_gross))
     m2.metric("Total Razorpay Fees", format_inr(total_fees))
-    m3.metric("Unmapped Payments", unmapped_count, help="Payments where the creator code was missing or invalid.")
+    m3.metric("Unmapped Payments (Last 100)", unmapped_count, help="Payments where the creator code was missing or invalid.")
 
+# ==============================================================================
+# 3. UNMAPPED STATUS SUMMARY
+# ==============================================================================
 st.divider()
-
-# ==============================================================================
-# 3. BULK REMAP TOOL
-# ==============================================================================
-st.markdown("### 🔗 Bulk Remap Unmapped Payments")
-st.caption("Use this to assign historical payments to a creator that was added AFTER the payments were received.")
+st.markdown("### 🔗 Unmapped Payments Status")
 
 unmapped_count_res = supabase.table('payments').select('id', count='exact').is_('creator_id', 'null').execute()
 total_unmapped = unmapped_count_res.count if (unmapped_count_res and unmapped_count_res.count is not None) else 0
 
 if total_unmapped > 0:
-    st.info(f"There are currently **{total_unmapped}** unmapped payments in the database.")
-    
-    with st.form("bulk_remap_form"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            remap_start = st.date_input("Start Date", value=today_ist - datetime.timedelta(days=30))
-        with c2:
-            remap_end = st.date_input("End Date", value=today_ist)
-        with c3:
-            creators_res = supabase.table('creators').select('id, creator_handle, creator_code').eq('status', 'ACTIVE').order('creator_handle').execute()
-            creators_list = creators_res.data if (creators_res and creators_res.data) else []
-            creator_options = {f"{c['creator_handle']} ({c['creator_code']})": c['id'] for c in creators_list}
-            
-            if not creator_options:
-                st.warning("No active creators found.")
-                selected_creator_id = None
-            else:
-                selected_creator_label = st.selectbox("Assign to Creator", options=list(creator_options.keys()))
-                selected_creator_id = creator_options[selected_creator_label]
-                
-        submitted_remap = st.form_submit_button("🔗 Map Unmapped Payments", type="primary", width="stretch")
-        
-        if submitted_remap and selected_creator_id:
-            start_dt = datetime.datetime.combine(remap_start, datetime.time.min, tzinfo=IST)
-            end_dt = datetime.datetime.combine(remap_end, datetime.time.max, tzinfo=IST)
-            start_iso = start_dt.astimezone(datetime.timezone.utc).isoformat()
-            end_iso = end_dt.astimezone(datetime.timezone.utc).isoformat()
-            
-            try:
-                res = supabase.table('payments').update({"creator_id": selected_creator_id})\
-                    .is_('creator_id', 'null')\
-                    .gte('created_at', start_iso)\
-                    .lte('created_at', end_iso)\
-                    .execute()
-                
-                updated_count = len(res.data) if (res and res.data) else 0
-                st.success(f"✅ Successfully mapped {updated_count} payments to {selected_creator_label}!")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to remap: {e}")
+    st.warning(f"⚠️ There are currently **{total_unmapped}** unmapped payments in the database. Click the **Auto-Remap** button at the top to automatically link them to existing creators based on their Razorpay receipts.")
 else:
-    st.success("🎉 All payments in the database are successfully mapped to creators!")
+    st.success("🎉 **Perfect!** All payments in the database are successfully mapped to creators!")

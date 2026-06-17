@@ -28,7 +28,6 @@ if 'last_sync_result' in st.session_state:
         del st.session_state['last_sync_result']
         st.rerun()
 
-# Check latest record for incremental sync
 latest_res = supabase.table('payments').select('created_at').order('created_at', desc=True).limit(1).execute()
 from_timestamp = 0
 last_sync_str = "Beginning of time"
@@ -142,24 +141,44 @@ else:
     
     total_gross = sum(p.get('amount_inr', 0) or 0 for p in payments_data)
     total_fees = sum(p.get('fee_inr', 0) or 0 for p in payments_data)
-    unmapped_count = len([p for p in payments_data if not p.get('creator_id')])
-    
-    st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Gross (Last 100)", format_inr(total_gross))
-    m2.metric("Total Razorpay Fees", format_inr(total_fees))
-    m3.metric("Unmapped Payments (Last 100)", unmapped_count, help="Payments where the creator code was missing or invalid.")
 
 # ==============================================================================
-# 3. UNMAPPED STATUS SUMMARY
+# 3. UNMAPPED PAYMENTS DEBUG TABLE
 # ==============================================================================
 st.divider()
-st.markdown("### 🔗 Unmapped Payments Status")
+st.markdown("### 🔗 Unmapped Payments & Missing Creator Codes")
+st.caption("If a payment is unmapped, it means the creator code attached to the Razorpay receipt doesn't exist in your CMS yet. Use this table to see exactly which codes you need to add.")
 
-unmapped_count_res = supabase.table('payments').select('id', count='exact').is_('creator_id', 'null').execute()
-total_unmapped = unmapped_count_res.count if (unmapped_count_res and unmapped_count_res.count is not None) else 0
+# Fetch unmapped payments with the new debug columns
+unmapped_res = supabase.table('payments').select(
+    'payment_id, amount_inr, created_at, receipt, creator_code_attempted'
+).is_('creator_id', 'null').order('created_at', desc=True).execute()
 
-if total_unmapped > 0:
-    st.warning(f"⚠️ There are currently **{total_unmapped}** unmapped payments in the database. Click the **Auto-Remap** button at the top to automatically link them to existing creators based on their Razorpay receipts.")
-else:
+unmapped_data = unmapped_res.data if (unmapped_res and unmapped_res.data) else []
+
+if not unmapped_data:
     st.success("🎉 **Perfect!** All payments in the database are successfully mapped to creators!")
+else:
+    st.warning(f"⚠️ There are currently **{len(unmapped_data)}** unmapped payments. See the exact Razorpay codes below:")
+    
+    df_unmapped = pd.DataFrame(unmapped_data)
+    df_unmapped['Date (IST)'] = df_unmapped['created_at'].apply(to_ist)
+    df_unmapped['Amount (INR)'] = df_unmapped['amount_inr'].apply(format_inr)
+    
+    # Rename columns for the UI
+    df_unmapped = df_unmapped.rename(columns={
+        'creator_code_attempted': 'Attempted Creator Code',
+        'receipt': 'Raw Razorpay Receipt'
+    })
+    
+    display_unmapped = df_unmapped[['Date (IST)', 'Amount (INR)', 'Attempted Creator Code', 'Raw Razorpay Receipt', 'payment_id']]
+    
+    st.dataframe(display_unmapped, width="stretch", hide_index=True, column_config={
+        "Date (IST)": st.column_config.TextColumn("Date", width="small"),
+        "Amount (INR)": st.column_config.TextColumn("Amount", width="small"),
+        "Attempted Creator Code": st.column_config.TextColumn("Missing Code to Add", width="medium"),
+        "Raw Razorpay Receipt": st.column_config.TextColumn("Raw Receipt String", width="large"),
+        "payment_id": st.column_config.TextColumn("Payment ID", width="medium")
+    })
+    
+    st.info("💡 **Action Required:** Look at the **Attempted Creator Code** column. If you see a code like `xyz`, go to the **Creator List** page and add a new creator with the code `xyz`. Once added, click the **Auto-Remap** button at the top of this page to link these payments instantly!")

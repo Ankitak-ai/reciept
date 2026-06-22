@@ -1,184 +1,372 @@
-import streamlit as st
-import pandas as pd
-import requests
-import time
-import datetime
-from zoneinfo import ZoneInfo
-from utils.supabase_client import supabase
-from utils.auth import require_auth
-from utils.helpers import format_inr, to_ist
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createHmac } from "node:crypto";
 
-require_auth()
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-razorpay-signature, x-backfill-secret',
+};
 
-st.set_page_config(page_title="Razorpay Payments", page_icon="💳", layout="wide")
-st.title("💳 Razorpay Payment Sync & Management")
+function extractCreatorCode(entity: any): string | null {
+  const receipt = entity.receipt || '';
+  if (typeof receipt === 'string' && receipt.includes('_')) {
+    return receipt.split('_')[0];
+  }
+  const notes = entity.notes;
+  if (typeof notes === 'object' && notes !== null && !Array.isArray(notes)) {
+    const noteReceipt = notes.receipt || notes.creator_code || '';
+    if (typeof noteReceipt === 'string' && noteReceipt.includes('_')) {
+      return noteReceipt.split('_')[0];
+    }
+  }
+  return null;
+}
 
-IST = ZoneInfo("Asia/Kolkata")
-today_ist = datetime.datetime.now(IST).date()
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
 
-# ==============================================================================
-# 1. SYNC CONTROLS
-# ==============================================================================
-st.markdown("### 🔄 Sync Controls")
+  const url = new URL(req.url);
+  const path = url.pathname;
 
-if 'last_sync_result' in st.session_state:
-    res = st.session_state['last_sync_result']
-    st.success(f"🎉 **Last Sync Complete:** {res['message']} (Completed at {res['time']})")
-    if st.button("Dismiss", key="dismiss_sync"):
-        del st.session_state['last_sync_result']
-        st.rerun()
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
 
-latest_res = supabase.table('payments').select('created_at').order('created_at', desc=True).limit(1).execute()
-from_timestamp = 0
-last_sync_str = "Beginning of time"
+    // ✅ FIX: Fetch exchange rates once per request to convert foreign currencies
+    const { data: rates } = await supabase.from('currency_rates').select('currency_code, rate_to_inr');
+    const rateMap = new Map<string, number>();
+    if (rates) {
+      rates.forEach(r => rateMap.set(r.currency_code.toUpperCase(), parseFloat(r.rate_to_inr)));
+    }
+    rateMap.set('INR', 1.0); // Fallback
 
-if latest_res.data and len(latest_res.data) > 0:
-    last_sync_dt = datetime.datetime.fromisoformat(latest_res.data[0]['created_at'].replace('Z', '+00:00'))
-    from_timestamp = int(last_sync_dt.timestamp())
-    last_sync_str = last_sync_dt.strftime('%d %b %Y %H:%M IST')
+    // Helper function to convert amounts
+    const convertToInr = (originalAmount: number, currency: string) => {
+      const curr = (currency || 'INR').toUpperCase();
+      const rate = rateMap.get(curr) || 1.0;
+      return Math.round(originalAmount * rate);
+    };
 
-st.caption(f"💡 **Smart Sync:** Database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data.")
+    // ========================================================================
+    // 🔗 AUTO-REMAP ENDPOINT
+    // ========================================================================
+    if (path.endsWith('/auto-remap')) {
+      const backfillSecret = req.headers.get('x-backfill-secret');
+      const expectedToken = Deno.env.get('BACKFILL_SECRET');
+      
+      if (backfillSecret !== expectedToken) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
 
-col1, col2 = st.columns(2)
+      // 1. Fetch all creators into memory
+      const { data: allCreators } = await supabase.from('creators').select('id, creator_code');
+      const creatorMap = new Map<string, string>();
+      if (allCreators) allCreators.forEach((c: any) => creatorMap.set(c.creator_code, c.id));
 
-with col1:
-    if st.button("🔄 Sync New & Missing Data", type="primary", width="stretch"):
-        function_url = st.secrets.get("BACKFILL_URL")
-        secret_token = st.secrets.get("BACKFILL_SECRET")
-        anon_key = st.secrets.get("SUPABASE_ANON_KEY")
-        
-        if not function_url or not secret_token or not anon_key:
-            st.error("Missing secrets.")
-            st.stop()
+      // 2. Fetch ONLY unmapped payments from the database
+      const { data: unmappedPayments } = await supabase
+        .from('payments')
+        .select('id, order_id')
+        .is('creator_id', null);
+
+      if (!unmappedPayments || unmappedPayments.length === 0) {
+        return new Response(JSON.stringify({ success: true, remapped: 0, message: "No unmapped payments found." }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      const rzpAuth = btoa(`${Deno.env.get('RAZORPAY_KEY_ID')}:${Deno.env.get('RAZORPAY_KEY_SECRET')}`);
+      const rzpHeaders = { Authorization: `Basic ${rzpAuth}` };
+
+      let remappedCount = 0;
+
+      // 3. Fetch Orders from Razorpay to find the receipts
+      for (const p of unmappedPayments) {
+        if (!p.order_id) continue;
+
+        try {
+          const orderRes = await fetch(`https://api.razorpay.com/v1/orders/${p.order_id}`, { headers: rzpHeaders });
+          if (orderRes.ok) {
+            const orderData = await orderRes.json();
+            const creatorCode = extractCreatorCode(orderData);
+            const rawReceipt = orderData.receipt || '';
             
-        headers = {"Authorization": f"Bearer {anon_key}", "x-backfill-secret": secret_token, "Content-Type": "application/json"}
+            // ✅ Save the attempted code and receipt even if it fails to map
+            const updateData: any = {
+              receipt: rawReceipt,
+              creator_code_attempted: creatorCode
+            };
+
+            if (creatorCode && creatorMap.has(creatorCode)) {
+              updateData.creator_id = creatorMap.get(creatorCode);
+              remappedCount++;
+            }
+
+            await supabase.from('payments').update(updateData).eq('id', p.id);
+          }
+        } catch (e) {
+          // Ignore individual order fetch errors to prevent the whole batch from failing
+        }
+      }
+
+      return new Response(JSON.stringify({ 
+        success: true, 
+        remapped: remappedCount, 
+        message: `Successfully auto-remapped ${remappedCount} payments.` 
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // ========================================================================
+    // 🔙 INCREMENTAL BACKFILL ENDPOINT
+    // ========================================================================
+    if (path.endsWith('/backfill')) {
+      const backfillSecret = req.headers.get('x-backfill-secret');
+      const expectedToken = Deno.env.get('BACKFILL_SECRET');
+      
+      if (backfillSecret !== expectedToken) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+
+      let body: any = {};
+      try { body = await req.json(); } catch { body = {}; }
+      
+      const skipParam = body.skip || 0;
+      const limitParam = Math.min(body.limit || 500, 1000);
+      const fromTimestamp = body.from_timestamp || 0;
+
+      const { data: allCreators } = await supabase.from('creators').select('id, creator_code');
+      const creatorMap = new Map<string, string>();
+      if (allCreators) allCreators.forEach((c: any) => creatorMap.set(c.creator_code, c.id));
+
+      const { data: existingPayments } = await supabase.from('payments').select('payment_id, creator_id');
+      const existingMap = new Map<string, string | null>();
+      if (existingPayments) existingPayments.forEach((p: any) => existingMap.set(p.payment_id, p.creator_id));
+
+      const rzpAuth = btoa(`${Deno.env.get('RAZORPAY_KEY_ID')}:${Deno.env.get('RAZORPAY_KEY_SECRET')}`);
+      const rzpHeaders = { Authorization: `Basic ${rzpAuth}` };
+      
+      let allPayments: any[] = [];
+      let allOrders: any[] = [];
+      
+      const batchSize = 100;
+      let currentSkip = skipParam;
+      
+      while (allPayments.length < limitParam) {
+        let rzpUrl = `https://api.razorpay.com/v1/payments?count=${batchSize}&skip=${currentSkip}`;
+        if (fromTimestamp > 0) rzpUrl += `&from=${fromTimestamp}`;
         
-        skip = 0
-        batch_size = 500
-        total_synced = 0
-        total_refunds = 0
+        const res = await fetch(rzpUrl, { headers: rzpHeaders });
+        const json = await res.json();
+        const items = json.items || [];
+        if (items.length === 0) break;
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        allPayments.push(...items);
+        currentSkip += batchSize;
+        if (items.length < batchSize) break;
+      }
+
+      let orderSkip = skipParam;
+      const orderLimit = limitParam * 2; 
+      while (allOrders.length < orderLimit) {
+        let orderUrl = `https://api.razorpay.com/v1/orders?count=${batchSize}&skip=${orderSkip}`;
+        if (fromTimestamp > 0) orderUrl += `&from=${fromTimestamp}`;
         
-        while True:
-            status_text.info(f"⏳ Fetching batch... Total new synced: {total_synced}")
-            payload = {"skip": skip, "limit": batch_size, "from_timestamp": from_timestamp}
-            
-            try:
-                response = requests.post(function_url, headers=headers, json=payload, timeout=90)
-                if response.status_code == 200:
-                    result = response.json()
-                    total_synced += result.get("payments_synced", 0)
-                    total_refunds += result.get("refunds_synced", 0)
-                    if result.get("processed_count", 0) == 0: break
-                    skip += batch_size
-                else:
-                    st.error(f"Server error: {response.text}")
-                    break
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
-                break
-                
-        progress_bar.progress(100)
-        msg = f"Synced {total_synced} new payments and {total_refunds} refunds." if total_synced > 0 else "Database is already 100% up to date!"
-        st.session_state['last_sync_result'] = {"message": msg, "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")}
-        if total_synced > 0: st.balloons()
-        st.rerun()
-
-with col2:
-    if st.button("🔗 Auto-Remap Unmapped Payments", type="secondary", width="stretch"):
-        function_url = st.secrets.get("BACKFILL_URL").replace('/backfill', '/auto-remap')
-        secret_token = st.secrets.get("BACKFILL_SECRET")
-        anon_key = st.secrets.get("SUPABASE_ANON_KEY")
+        const res = await fetch(orderUrl, { headers: rzpHeaders });
+        const json = await res.json();
+        const items = json.items || [];
+        if (items.length === 0) break;
         
-        headers = {"Authorization": f"Bearer {anon_key}", "x-backfill-secret": secret_token}
-        
-        with st.spinner("Scanning unmapped payments and fetching Razorpay orders..."):
-            try:
-                response = requests.post(function_url, headers=headers, timeout=120)
-                if response.status_code == 200:
-                    result = response.json()
-                    st.session_state['last_sync_result'] = {
-                        "message": result.get('message', 'Auto-remap complete.'), 
-                        "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
-                    }
-                    st.balloons()
-                    st.rerun()
-                else:
-                    st.error(f"Auto-remap failed: {response.text}")
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
+        allOrders.push(...items);
+        orderSkip += batchSize;
+        if (items.length < batchSize) break;
+      }
 
-st.divider()
+      // ✅ Store both the code and the raw receipt
+      const orderDataMap = new Map<string, { code: string | null, receipt: string }>();
+      for (const order of allOrders) {
+        orderDataMap.set(order.id, {
+          code: extractCreatorCode(order),
+          receipt: order.receipt || ''
+        });
+      }
 
-# ==============================================================================
-# 2. GLOBAL PAYMENTS LEDGER
-# ==============================================================================
-st.markdown("### 📜 Global Payments Ledger")
-st.caption("Showing the last 100 successful payments across all creators. (Timestamps are in IST).")
+      let allPaymentsToUpsert: any[] = [];
+      for (const p of allPayments) {
+        if (p.status !== 'captured') continue;
 
-payments_res = supabase.table('payments').select(
-    '*, creators:creator_id(creator_handle, creator_code)'
-).order('created_at', desc=True).limit(100).execute()
+        let creatorId = null;
+        let creatorCode = null;
+        let rawReceipt = '';
 
-payments_data = payments_res.data if (payments_res and payments_res.data) else []
+        if (existingMap.has(p.id) && existingMap.get(p.id) !== null) {
+          creatorId = existingMap.get(p.id);
+        } else {
+          if (p.order_id && orderDataMap.has(p.order_id)) {
+            const oData = orderDataMap.get(p.order_id)!;
+            creatorCode = oData.code;
+            rawReceipt = oData.receipt;
+          }
+          if (!creatorCode) {
+            creatorCode = extractCreatorCode(p);
+            rawReceipt = p.receipt || '';
+          }
+          creatorId = creatorCode ? (creatorMap.get(creatorCode) || null) : null;
+        }
 
-if not payments_data:
-    st.info("No payments found in the database yet.")
-else:
-    df_payments = pd.DataFrame(payments_data)
-    
-    df_payments['Creator'] = df_payments['creators'].apply(lambda x: x['creator_handle'] if x else 'Unmapped')
-    df_payments['Code'] = df_payments['creators'].apply(lambda x: x['creator_code'] if x else '-')
-    df_payments['Gross (INR)'] = df_payments['amount_inr'].apply(format_inr)
-    df_payments['Fees (INR)'] = df_payments['fee_inr'].apply(format_inr)
-    df_payments['Date (IST)'] = df_payments['created_at'].apply(to_ist)
-    
-    display_cols = ['Date (IST)', 'payment_id', 'Creator', 'Code', 'original_currency', 'Gross (INR)', 'Fees (INR)', 'method', 'status']
-    
-    st.dataframe(df_payments[display_cols], width="stretch", hide_index=True)
-    
-    total_gross = sum(p.get('amount_inr', 0) or 0 for p in payments_data)
-    total_fees = sum(p.get('fee_inr', 0) or 0 for p in payments_data)
+        // ✅ FIX: Convert foreign currency to INR
+        const originalAmount = p.amount;
+        const currency = (p.currency || 'INR').toUpperCase();
+        const amountInr = convertToInr(originalAmount, currency);
 
-# ==============================================================================
-# 3. UNMAPPED PAYMENTS DEBUG TABLE
-# ==============================================================================
-st.divider()
-st.markdown("### 🔗 Unmapped Payments & Missing Creator Codes")
-st.caption("If a payment is unmapped, it means the creator code attached to the Razorpay receipt doesn't exist in your CMS yet. Use this table to see exactly which codes you need to add.")
+        allPaymentsToUpsert.push({
+          payment_id: p.id,
+          order_id: p.order_id,
+          amount_inr: amountInr, // Converted!
+          fee_inr: p.fee || 0,   // Already INR from Razorpay
+          tax_inr: p.tax || 0,   // Already INR from Razorpay
+          status: p.status,
+          method: p.method,
+          original_currency: currency,
+          original_amount: originalAmount,
+          creator_id: creatorId,
+          is_settled: false,
+          created_at: new Date(p.created_at * 1000).toISOString(),
+          receipt: rawReceipt,
+          creator_code_attempted: creatorCode
+        });
+      }
 
-# Fetch unmapped payments with the new debug columns
-unmapped_res = supabase.table('payments').select(
-    'payment_id, amount_inr, created_at, receipt, creator_code_attempted'
-).is_('creator_id', 'null').order('created_at', desc=True).execute()
+      let synced = 0;
+      for (let i = 0; i < allPaymentsToUpsert.length; i += 100) {
+        const chunk = allPaymentsToUpsert.slice(i, i + 100);
+        await supabase.from('payments').upsert(chunk, { onConflict: 'payment_id' });
+        synced += chunk.length;
+      }
 
-unmapped_data = unmapped_res.data if (unmapped_res and unmapped_res.data) else []
+      let refSynced = 0;
+      if (skipParam === 0) {
+        let refSkip = 0;
+        let allRefundsToUpsert: any[] = [];
+        while (refSkip < 1000) { 
+          let refUrl = `https://api.razorpay.com/v1/refunds?count=100&skip=${refSkip}`;
+          if (fromTimestamp > 0) refUrl += `&from=${fromTimestamp}`;
+          
+          const res = await fetch(refUrl, { headers: rzpHeaders });
+          const json = await res.json();
+          const items = json.items || [];
+          if (items.length === 0) break;
+          
+          for (const r of items) {
+            allRefundsToUpsert.push({
+              refund_id: r.id,
+              payment_id: r.payment_id,
+              amount_inr: r.amount,
+              amount: r.amount, 
+              status: r.status,
+              created_at: new Date(r.created_at * 1000).toISOString()
+            });
+          }
+          refSkip += 100;
+          if (items.length < 100) break;
+        }
+        for (let i = 0; i < allRefundsToUpsert.length; i += 100) {
+          const chunk = allRefundsToUpsert.slice(i, i + 100);
+          await supabase.from('refunds').upsert(chunk, { onConflict: 'refund_id' });
+          refSynced += chunk.length;
+        }
+      }
 
-if not unmapped_data:
-    st.success("🎉 **Perfect!** All payments in the database are successfully mapped to creators!")
-else:
-    st.warning(f"⚠️ There are currently **{len(unmapped_data)}** unmapped payments. See the exact Razorpay codes below:")
-    
-    df_unmapped = pd.DataFrame(unmapped_data)
-    df_unmapped['Date (IST)'] = df_unmapped['created_at'].apply(to_ist)
-    df_unmapped['Amount (INR)'] = df_unmapped['amount_inr'].apply(format_inr)
-    
-    # Rename columns for the UI
-    df_unmapped = df_unmapped.rename(columns={
-        'creator_code_attempted': 'Attempted Creator Code',
-        'receipt': 'Raw Razorpay Receipt'
-    })
-    
-    display_unmapped = df_unmapped[['Date (IST)', 'Amount (INR)', 'Attempted Creator Code', 'Raw Razorpay Receipt', 'payment_id']]
-    
-    st.dataframe(display_unmapped, width="stretch", hide_index=True, column_config={
-        "Date (IST)": st.column_config.TextColumn("Date", width="small"),
-        "Amount (INR)": st.column_config.TextColumn("Amount", width="small"),
-        "Attempted Creator Code": st.column_config.TextColumn("Missing Code to Add", width="medium"),
-        "Raw Razorpay Receipt": st.column_config.TextColumn("Raw Receipt String", width="large"),
-        "payment_id": st.column_config.TextColumn("Payment ID", width="medium")
-    })
-    
-    st.info("💡 **Action Required:** Look at the **Attempted Creator Code** column. If you see a code like `xyz`, go to the **Creator List** page and add a new creator with the code `xyz`. Once added, click the **Auto-Remap** button at the top of this page to link these payments instantly!")
+      return new Response(JSON.stringify({ 
+        success: true, 
+        payments_synced: synced, 
+        refunds_synced: refSynced, 
+        processed_count: allPayments.length 
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // ========================================================================
+    // 🌐 REAL-TIME WEBHOOK HANDLER
+    // ========================================================================
+    const signature = req.headers.get('x-razorpay-signature');
+    const webhookSecret = Deno.env.get('RAZORPAY_WEBHOOK_SECRET');
+    const rawBody = await req.text();
+
+    const expectedSig = createHmac('sha256', webhookSecret || '')
+      .update(rawBody)
+      .digest('hex');
+      
+    if (signature !== expectedSig) {
+      return new Response(JSON.stringify({ error: 'Invalid signature' }), { 
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      });
+    }
+
+    const event = JSON.parse(rawBody);
+
+    if (event.event === 'order.paid') {
+      const order = event.payload.order.entity;
+      const payment = event.payload.payment?.entity || {};
+      
+      const creatorCode = extractCreatorCode(order);
+      let creatorId = null;
+      if (creatorCode) {
+        const { data } = await supabase.from('creators').select('id').eq('creator_code', creatorCode).limit(1).maybeSingle();
+        creatorId = data?.id || null;
+      }
+
+      // ✅ FIX: Convert foreign currency to INR
+      const originalAmount = order.amount_paid || order.amount;
+      const currency = (order.currency || 'INR').toUpperCase();
+      const amountInr = convertToInr(originalAmount, currency);
+
+      await supabase.from('payments').upsert({
+        payment_id: payment.id || order.id,
+        order_id: order.id,
+        amount_inr: amountInr, // Converted!
+        fee_inr: payment.fee || 0,
+        tax_inr: payment.tax || 0,
+        status: 'captured',
+        method: payment.method || 'unknown',
+        original_currency: currency,
+        original_amount: originalAmount,
+        creator_id: creatorId,
+        is_settled: false,
+        created_at: new Date((order.created_at || payment.created_at) * 1000).toISOString(),
+        receipt: order.receipt || '',
+        creator_code_attempted: creatorCode
+      }, { onConflict: 'payment_id' });
+    } 
+    else if (event.event === 'refund.created' || event.event === 'refund.processed') {
+      const refund = event.payload.refund.entity;
+      await supabase.from('refunds').upsert({
+        refund_id: refund.id,
+        payment_id: refund.payment_id,
+        amount_inr: refund.amount,
+        amount: refund.amount,
+        status: refund.status,
+        created_at: new Date(refund.created_at * 1000).toISOString()
+      }, { onConflict: 'refund_id' });
+    }
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});

@@ -4,7 +4,6 @@ import datetime
 import uuid
 import io
 from zoneinfo import ZoneInfo
-from collections import defaultdict
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from utils.supabase_client import supabase, fetch_all
@@ -21,8 +20,8 @@ IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
 
 tab_single, tab_bulk, tab_history = st.tabs([
-    "👤 Single Creator Payout", 
-    "⚡ Bulk Payouts (All Creators)", 
+    "👤 Single Creator Payout",
+    "⚡ Bulk Payouts (All Creators)",
     "📜 Payout History & Reconciliation"
 ])
 
@@ -33,33 +32,37 @@ def generate_payout_pdf(payout, creator, fin_info):
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
-    
+
     p.setFont("Helvetica-Bold", 20)
     p.drawString(50, height - 50, "StreamHeart Private Limited")
     p.setFont("Helvetica", 12)
     p.drawString(50, height - 70, "Official Payout Receipt")
-    
+
     p.setFont("Helvetica-Bold", 14)
     p.drawString(50, height - 120, f"Creator: {creator.get('creator_handle', 'N/A')}")
     p.drawString(50, height - 140, f"Payout ID: {payout.get('id', 'N/A')[:8]}...")
     p.drawString(50, height - 160, f"Generated: {pd.to_datetime(payout.get('created_at')).strftime('%d %b %Y') if payout.get('created_at') else 'N/A'}")
-    
+
     p.setFont("Helvetica", 12)
     y = height - 200
-    p.drawString(50, y, f"Cycle: {pd.to_datetime(payout.get('cycle_start')).strftime('%d %b') if payout.get('cycle_start') else 'N/A'} to {pd.to_datetime(payout.get('cycle_end')).strftime('%d %b') if payout.get('cycle_end') else 'N/A'}")
+    start_str = pd.to_datetime(payout.get('cycle_start_date')).strftime('%d %b') if payout.get('cycle_start_date') else 'N/A'
+    end_str = pd.to_datetime(payout.get('cycle_end_date')).strftime('%d %b') if payout.get('cycle_end_date') else 'N/A'
+    p.drawString(50, y, f"Cycle: {start_str} to {end_str}")
     y -= 25
-    p.drawString(50, y, f"Gross Volume: {format_inr(payout.get('total_gmv_inr', 0))}")
+    p.drawString(50, y, f"Gross Volume: {format_inr(payout.get('gross_amount_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Refunds Deducted: {format_inr(payout.get('total_refunds_inr', 0))}")
+    p.drawString(50, y, f"Razorpay Fees: {format_inr(payout.get('razorpay_fees_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Adjusted Gross: {format_inr(payout.get('adjusted_gross_inr', 0))}")
+    p.drawString(50, y, f"Tax (GST): {format_inr(payout.get('tax_inr', 0))}")
     y -= 20
-    p.drawString(50, y, f"Platform Commission: {format_inr(payout.get('platform_fee_inr', 0))}")
-    
+    p.drawString(50, y, f"Refunds Deducted: {format_inr(payout.get('refunds_deducted_inr', 0))}")
+    y -= 20
+    p.drawString(50, y, f"Platform Commission: {format_inr(payout.get('platform_commission_inr', 0))}")
+
     p.setFont("Helvetica-Bold", 16)
     y -= 40
     p.drawString(50, y, f"NET PAYOUT TRANSFERRED: {format_inr(payout.get('creator_share_inr', 0))}")
-    
+
     if fin_info:
         y -= 50
         p.setFont("Helvetica-Bold", 12)
@@ -71,15 +74,15 @@ def generate_payout_pdf(payout, creator, fin_info):
         p.drawString(50, y, f"UPI: {fin_info.get('upi_id') or 'N/A'}")
         y -= 15
         p.drawString(50, y, f"Bank: {fin_info.get('bank_name') or 'N/A'} (A/C: XXXX{fin_info.get('account_number_last4') or 'N/A'})")
-        
-    if payout.get('utr'):
+
+    if payout.get('transaction_ref'):
         y -= 40
         p.setFont("Helvetica-Bold", 12)
-        p.drawString(50, y, f"UTR / Bank Ref: {payout['utr']}")
+        p.drawString(50, y, f"Transaction Ref: {payout['transaction_ref']}")
         y -= 20
-        paid_date = pd.to_datetime(payout['paid_at']).strftime('%d %b %Y %H:%M') if payout.get('paid_at') else 'N/A'
+        paid_date = pd.to_datetime(payout['payout_date']).strftime('%d %b %Y %H:%M') if payout.get('payout_date') else 'N/A'
         p.drawString(50, y, f"Paid On: {paid_date}")
-        
+
     p.showPage()
     p.save()
     buffer.seek(0)
@@ -103,15 +106,49 @@ end_iso = end_dt_ist.astimezone(datetime.timezone.utc).isoformat()
 st.caption(f"🕒 Querying from: **{cycle_start.strftime('%d/%m/%Y %H:%M')} IST** to **{cycle_end.strftime('%d/%m/%Y %H:%M')} IST**")
 
 # ==============================================================================
+# HELPER: Calculate payout for a specific creator
+# ==============================================================================
+def calculate_creator_payout(creator_id, payout_rate, start_iso, end_iso):
+    unsettled_payments = fetch_all(lambda: supabase.table('payments').select(
+        'id, amount_inr, fee_inr, tax_inr'
+    ).eq('creator_id', creator_id).eq('is_settled', False).gte('created_at', start_iso).lte('created_at', end_iso))
+
+    cycle_refunds = fetch_all(lambda: supabase.table('refunds').select('amount_inr, payment_id').gte('created_at', start_iso).lte('created_at', end_iso))
+
+    creator_payment_ids = set(p['payment_id'] for p in fetch_all(lambda: supabase.table('payments').select('payment_id').eq('creator_id', creator_id)))
+
+    creator_refunds = [r for r in cycle_refunds if r.get('payment_id') in creator_payment_ids]
+
+    total_gross = sum(p.get('amount_inr', 0) or 0 for p in unsettled_payments)
+    total_fees = sum(p.get('fee_inr', 0) or 0 for p in unsettled_payments)
+    total_tax = sum(p.get('tax_inr', 0) or 0 for p in unsettled_payments)
+    total_refunds = sum(r.get('amount_inr', 0) or 0 for r in creator_refunds)
+
+    adjusted_gross = total_gross - total_refunds
+    creator_share = round(adjusted_gross * (payout_rate / 100))
+    platform_commission = adjusted_gross - creator_share
+
+    return {
+        "unsettled_payments": unsettled_payments,
+        "total_gross": total_gross,
+        "total_fees": total_fees,
+        "total_tax": total_tax,
+        "total_refunds": total_refunds,
+        "adjusted_gross": adjusted_gross,
+        "creator_share": creator_share,
+        "platform_commission": platform_commission
+    }
+
+# ==============================================================================
 # TAB 1: SINGLE CREATOR PAYOUT
 # ==============================================================================
 with tab_single:
     st.markdown("### 👤 Generate Payout for Specific Creator")
-    
+
     creators_res = supabase.table('creators').select('id, creator_handle, creator_code, payout_rate').eq('status', 'ACTIVE').order('creator_handle').execute()
     creators_list = creators_res.data or []
     creator_options = {f"{c['creator_handle']} ({c['creator_code']})": c for c in creators_list}
-    
+
     if not creator_options:
         st.warning("No active creators found.")
     else:
@@ -119,60 +156,56 @@ with tab_single:
         selected_creator = creator_options[selected_label]
         creator_id = selected_creator['id']
         payout_rate = float(selected_creator.get('payout_rate', 89.0))
-        
+
         fin_res = supabase.table('creator_financial_info').select('*').eq('creator_id', creator_id).execute()
         fin_info = fin_res.data[0] if fin_res.data else {}
-        
+
         st.info(f"🏦 **Verify Bank Details:** {fin_info.get('legal_name') or 'N/A'} | UPI: {fin_info.get('upi_id') or 'N/A'} | Bank: {fin_info.get('bank_name') or 'N/A'}")
-        
+
         if st.button("🔍 Calculate Single Creator", type="secondary"):
             with st.spinner("Calculating unsettled earnings..."):
-                unsettled_payments = fetch_all(lambda: supabase.table('payments').select(
-                    'id, amount_inr, fee_inr, tax_inr'
-                ).eq('creator_id', creator_id).eq('is_settled', False).gte('created_at', start_iso).lte('created_at', end_iso))
-                
-                cycle_refunds = fetch_all(lambda: supabase.table('refunds').select('amount_inr, payment_id').gte('created_at', start_iso).lte('created_at', end_iso))
-                creator_payment_ids = set(p['payment_id'] for p in fetch_all(lambda: supabase.table('payments').select('payment_id').eq('creator_id', creator_id)))
-                creator_refunds = [r for r in cycle_refunds if r.get('payment_id') in creator_payment_ids]
+                result = calculate_creator_payout(creator_id, payout_rate, start_iso, end_iso)
 
-            total_gross = sum(p.get('amount_inr', 0) or 0 for p in unsettled_payments)
-            total_gateway_fees = sum((p.get('fee_inr', 0) or 0) + (p.get('tax_inr', 0) or 0) for p in unsettled_payments)
-            total_refunds = sum(r.get('amount_inr', 0) or 0 for r in creator_refunds)
-            
-            adjusted_gross = total_gross - total_refunds
-            creator_share = round(adjusted_gross * (payout_rate / 100))
-            platform_commission = adjusted_gross - creator_share
-            
-            if total_gross == 0:
+            if result['total_gross'] == 0:
                 st.info("📭 No unsettled payments found for this creator in the selected range.")
             else:
                 st.markdown("### 🧮 Payout Preview")
                 m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("Gross Donations", format_inr(total_gross))
-                m2.metric("Less: Refunds", format_inr(total_refunds), delta_color="inverse" if total_refunds > 0 else "off")
-                m3.metric("Adjusted Gross", format_inr(adjusted_gross))
-                m4.metric(f"Creator Share ({payout_rate}%)", format_inr(creator_share))
-                m5.metric("Platform Fee", format_inr(platform_commission))
-                
+                m1.metric("Gross Donations", format_inr(result['total_gross']))
+                m2.metric("Less: Refunds", format_inr(result['total_refunds']), delta_color="inverse" if result['total_refunds'] > 0 else "off")
+                m3.metric("Adjusted Gross", format_inr(result['adjusted_gross']))
+                m4.metric(f"Creator Share ({payout_rate}%)", format_inr(result['creator_share']))
+                m5.metric("Platform Commission", format_inr(result['platform_commission']))
+
                 with st.form("generate_single_payout_form"):
                     notes = st.text_area("Admin Notes (Optional)", placeholder="e.g., Standard monthly payout...")
                     submitted = st.form_submit_button("🔒 Generate & Lock Payout", type="primary", width="stretch")
-                    
+
                     if submitted:
                         try:
                             payout_id = str(uuid.uuid4())
+
+                            # ✅ INSERT with EXACT database column names
                             supabase.table('payouts').insert({
-                                "id": payout_id, "creator_id": creator_id, "cycle_start": start_iso, "cycle_end": end_iso,
-                                "total_gmv_inr": total_gross, "total_refunds_inr": total_refunds, "adjusted_gross_inr": adjusted_gross,
-                                "creator_share_inr": creator_share, "platform_fee_inr": platform_commission, "gateway_fee_inr": total_gateway_fees,
-                                "status": "PENDING", "notes": notes
+                                "id": payout_id,
+                                "creator_id": creator_id,
+                                "cycle_start_date": cycle_start.isoformat(),
+                                "cycle_end_date": cycle_end.isoformat(),
+                                "gross_amount_inr": result['total_gross'],
+                                "razorpay_fees_inr": result['total_fees'],
+                                "tax_inr": result['total_tax'],
+                                "refunds_deducted_inr": result['total_refunds'],
+                                "platform_commission_inr": result['platform_commission'],
+                                "creator_share_inr": result['creator_share'],
+                                "status": "PENDING"
                             }).execute()
-                            
-                            ids_to_lock = [p['id'] for p in unsettled_payments if 'id' in p]
+
+                            # Lock payments
+                            ids_to_lock = [p['id'] for p in result['unsettled_payments'] if 'id' in p]
                             for i in range(0, len(ids_to_lock), 100):
                                 supabase.table('payments').update({"is_settled": True, "payout_id": payout_id}).in_('id', ids_to_lock[i:i+100]).execute()
-                                
-                            st.success(f"✅ Payout of {format_inr(creator_share)} generated and locked!")
+
+                            st.success(f"✅ Payout of {format_inr(result['creator_share'])} generated and locked!")
                             st.balloons()
                             st.rerun()
                         except Exception as e:
@@ -183,92 +216,72 @@ with tab_single:
 # ==============================================================================
 with tab_bulk:
     st.markdown("### ⚡ Generate Payouts for ALL Active Creators")
-    st.caption("This will calculate unsettled earnings for every active creator in the selected cycle, generate payout records, and lock the underlying payments.")
-    
+    st.caption("This will calculate unsettled earnings for every active creator in the selected cycle.")
+
     st.warning("⚠️ **Warning:** This action cannot be easily undone. Ensure the date range is correct before proceeding.")
-    
+
     if st.button("🚀 Run Bulk Payout Generation", type="primary", width="stretch"):
         with st.spinner("Fetching all unsettled data for bulk processing..."):
-            # 1. Fetch ALL unsettled payments in the cycle
             all_unsettled = fetch_all(lambda: supabase.table('payments').select(
                 'id, creator_id, amount_inr, fee_inr, tax_inr'
             ).eq('is_settled', False).gte('created_at', start_iso).lte('created_at', end_iso))
-            
-            # 2. Fetch ALL refunds in the cycle
-            all_refunds = fetch_all(lambda: supabase.table('refunds').select('amount_inr, payment_id').gte('created_at', start_iso).lte('created_at', end_iso))
-            
-            # 3. Fetch ALL creators to get payout rates
+
             all_creators = {c['id']: c for c in fetch_all(lambda: supabase.table('creators').select('id, creator_handle, creator_code, payout_rate').eq('status', 'ACTIVE'))}
-            
-            # 4. Group data by creator_id
+
+            from collections import defaultdict
             creator_payments = defaultdict(list)
             for p in all_unsettled:
                 if p.get('creator_id'):
                     creator_payments[p['creator_id']].append(p)
-                    
-            creator_refunds_map = defaultdict(list)
-            valid_payment_ids = set(p['id'] for p in all_unsettled)
-            for r in all_refunds:
-                if r.get('payment_id') in valid_payment_ids:
-                    # Find which creator this payment belongs to
-                    for p in all_unsettled:
-                        if p['id'] == r['payment_id'] and p.get('creator_id'):
-                            creator_refunds_map[p['creator_id']].append(r)
-                            break
 
         st.divider()
         st.markdown(f"### 📊 Found **{len(creator_payments)}** creators with unsettled payments.")
-        
+
         if st.button("✅ Confirm & Execute Bulk Payouts", type="primary", width="stretch"):
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
-            total_creators_processed = 0
-            total_amount_generated = 0
-            
+            total_processed = 0
+            total_amount = 0
             creator_list = list(creator_payments.keys())
-            
+
             for idx, c_id in enumerate(creator_list):
                 status_text.info(f"Processing creator {idx + 1} of {len(creator_list)}...")
-                
                 creator = all_creators.get(c_id, {})
                 payout_rate = float(creator.get('payout_rate', 89.0))
-                
-                payments = creator_payments[c_id]
-                refunds = creator_refunds_map[c_id]
-                
-                t_gross = sum(p.get('amount_inr', 0) or 0 for p in payments)
-                t_fees = sum((p.get('fee_inr', 0) or 0) + (p.get('tax_inr', 0) or 0) for p in payments)
-                t_refunds = sum(r.get('amount_inr', 0) or 0 for r in refunds)
-                
-                adj_gross = t_gross - t_refunds
-                c_share = round(adj_gross * (payout_rate / 100))
-                p_comm = adj_gross - c_share
-                
-                if c_share > 0:
+
+                result = calculate_creator_payout(c_id, payout_rate, start_iso, end_iso)
+
+                if result['creator_share'] > 0:
                     try:
                         payout_id = str(uuid.uuid4())
                         supabase.table('payouts').insert({
-                            "id": payout_id, "creator_id": c_id, "cycle_start": start_iso, "cycle_end": end_iso,
-                            "total_gmv_inr": t_gross, "total_refunds_inr": t_refunds, "adjusted_gross_inr": adj_gross,
-                            "creator_share_inr": c_share, "platform_fee_inr": p_comm, "gateway_fee_inr": t_fees,
-                            "status": "PENDING", "notes": "Bulk Generated"
+                            "id": payout_id,
+                            "creator_id": c_id,
+                            "cycle_start_date": cycle_start.isoformat(),
+                            "cycle_end_date": cycle_end.isoformat(),
+                            "gross_amount_inr": result['total_gross'],
+                            "razorpay_fees_inr": result['total_fees'],
+                            "tax_inr": result['total_tax'],
+                            "refunds_deducted_inr": result['total_refunds'],
+                            "platform_commission_inr": result['platform_commission'],
+                            "creator_share_inr": result['creator_share'],
+                            "status": "PENDING"
                         }).execute()
-                        
-                        ids_to_lock = [p['id'] for p in payments if 'id' in p]
+
+                        ids_to_lock = [p['id'] for p in result['unsettled_payments'] if 'id' in p]
                         for i in range(0, len(ids_to_lock), 100):
                             supabase.table('payments').update({"is_settled": True, "payout_id": payout_id}).in_('id', ids_to_lock[i:i+100]).execute()
-                            
-                        total_creators_processed += 1
-                        total_amount_generated += c_share
+
+                        total_processed += 1
+                        total_amount += result['creator_share']
                     except Exception as e:
-                        st.error(f"Failed to process creator {creator.get('creator_handle', c_id)}: {e}")
-                
+                        st.error(f"Failed for {creator.get('creator_handle', c_id)}: {e}")
+
                 progress_bar.progress((idx + 1) / len(creator_list))
-            
+
             status_text.empty()
             progress_bar.empty()
-            st.success(f"🎉 **Bulk Payout Complete!** Generated **{total_creators_processed}** payout records totaling **{format_inr(total_amount_generated)}**.")
+            st.success(f"🎉 **Bulk Payout Complete!** Generated **{total_processed}** payouts totaling **{format_inr(total_amount)}**.")
             st.balloons()
             st.rerun()
 
@@ -277,74 +290,79 @@ with tab_bulk:
 # ==============================================================================
 with tab_history:
     st.markdown("### 📜 Payout Ledger")
-    st.caption("Track the status of all generated payouts. Mark them as PAID once the bank transfer is complete.")
-    
+    st.caption("Track the status of all generated payouts.")
+
     with st.spinner("Loading payout history..."):
         payouts_data = fetch_all(lambda: supabase.table('payouts').select(
             '*, creators:creator_id(creator_handle, creator_code)'
         ).order('created_at', desc=True))
-        
+
     if not payouts_data:
         st.info("No payouts generated yet.")
     else:
         df_payouts = pd.DataFrame(payouts_data)
-        
-        # Ultimate Safety: Ensure all expected columns exist to prevent KeyError
-        for col in ['status', 'utr', 'creator_share_inr', 'created_at']:
-            if col not in df_payouts.columns:
-                df_payouts[col] = 'UNKNOWN' if col == 'status' else ('N/A' if col == 'utr' else (0 if col == 'creator_share_inr' else datetime.datetime.now(datetime.timezone.utc).isoformat()))
-            
+
+        # Safe column defaults
+        if 'status' not in df_payouts.columns: df_payouts['status'] = 'UNKNOWN'
+        if 'transaction_ref' not in df_payouts.columns: df_payouts['transaction_ref'] = 'N/A'
+        if 'creator_share_inr' not in df_payouts.columns: df_payouts['creator_share_inr'] = 0
+        if 'created_at' not in df_payouts.columns: df_payouts['created_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         def get_creator_name(x):
             if isinstance(x, dict) and x:
                 return f"{x.get('creator_handle', 'Unknown')} ({x.get('creator_code', '?')})"
             return 'Unknown'
-            
-        df_payouts['Creator'] = df_payouts.get('creators', pd.Series([None]*len(df_payouts))).apply(get_creator_name)
+
+        df_payouts['Creator'] = df_payouts.get('creators', pd.Series([None] * len(df_payouts))).apply(get_creator_name)
         df_payouts['Payout Amount'] = df_payouts['creator_share_inr'].apply(format_inr)
-        
+
         def get_cycle_str(row):
-            start, end = row.get('cycle_start'), row.get('cycle_end')
+            start = row.get('cycle_start_date')
+            end = row.get('cycle_end_date')
             if start and end:
-                try: return f"{pd.to_datetime(start).strftime('%d %b')} - {pd.to_datetime(end).strftime('%d %b')}"
-                except: return "N/A"
+                try:
+                    return f"{pd.to_datetime(start).strftime('%d %b')} - {pd.to_datetime(end).strftime('%d %b')}"
+                except Exception:
+                    return "N/A"
             return "N/A"
-            
+
         df_payouts['Cycle'] = df_payouts.apply(get_cycle_str, axis=1)
         df_payouts['Generated On'] = pd.to_datetime(df_payouts['created_at']).dt.strftime('%d %b %Y %H:%M')
-        
-        display_cols = ['Generated On', 'Creator', 'Cycle', 'Payout Amount', 'status', 'utr']
+
+        display_cols = ['Generated On', 'Creator', 'Cycle', 'Payout Amount', 'status', 'transaction_ref']
         safe_display_cols = [col for col in display_cols if col in df_payouts.columns]
-        
-        st.dataframe(df_payouts[safe_display_cols], width="stretch", hide_index=True, column_config={
-            "status": st.column_config.SelectboxColumn("Status", options=["PENDING", "PAID", "FAILED", "UNKNOWN"]),
-            "utr": st.column_config.TextColumn("UTR / Ref Number")
-        })
-        
+
+        st.dataframe(df_payouts[safe_display_cols], width="stretch", hide_index=True)
+
         st.divider()
         st.markdown("### ✍️ Update Payout Status (Mark as Paid)")
-        
+
         pending_payouts = [p for p in payouts_data if p.get('status') == 'PENDING']
         if not pending_payouts:
-            st.success("🎉 No pending payouts. All creators have been paid!")
+            st.success("🎉 No pending payouts!")
         else:
-            pending_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p['id'] for p in pending_payouts}
-            
+            pending_options = {}
+            for p in pending_payouts:
+                label = f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})"
+                pending_options[label] = p['id']
+
             with st.form("update_status_form"):
                 c1, c2 = st.columns(2)
                 with c1:
                     sel_payout_label = st.selectbox("Select Payout", options=list(pending_options.keys()), key="mark_paid_sel")
                     sel_payout_id = pending_options[sel_payout_label]
                 with c2:
-                    utr_number = st.text_input("Enter UTR / Bank Ref Number", placeholder="e.g., UTIB1234567890")
-                    
+                    utr_number = st.text_input("Enter UTR / Transaction Ref", placeholder="e.g., UPI-616330527727")
+
                 if st.form_submit_button("✅ Mark as PAID", type="primary", width="stretch"):
                     if not utr_number.strip():
-                        st.error("Please enter the UTR number for audit trails.")
+                        st.error("Please enter the transaction reference.")
                     else:
                         try:
                             supabase.table('payouts').update({
-                                "status": "PAID", "utr": utr_number.strip().upper(),
-                                "paid_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                                "status": "PAID",
+                                "transaction_ref": utr_number.strip(),
+                                "payout_date": datetime.datetime.now(datetime.timezone.utc).isoformat()
                             }).eq('id', sel_payout_id).execute()
                             st.success("✅ Payout marked as PAID!")
                             st.rerun()
@@ -353,36 +371,49 @@ with tab_history:
 
         st.divider()
         st.markdown("### 📄 Download Official Payout Receipts (PDF)")
-        
+
         paid_payouts = [p for p in payouts_data if p.get('status') == 'PAID']
         if paid_payouts:
-            paid_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})": p for p in paid_payouts}
+            paid_options = {}
+            for p in paid_payouts:
+                label = f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b')})"
+                paid_options[label] = p
+
             sel_pdf_label = st.selectbox("Select Paid Payout", options=list(paid_options.keys()), key="pdf_sel")
             sel_pdf_payout = paid_options[sel_pdf_label]
-            
+
             c_id = sel_pdf_payout['creator_id']
             c_data = (supabase.table('creators').select('*').eq('id', c_id).execute().data or [{}])[0]
             f_data = (supabase.table('creator_financial_info').select('*').eq('creator_id', c_id).execute().data or [{}])[0]
-            
+
             pdf_bytes = generate_payout_pdf(sel_pdf_payout, c_data, f_data)
-            st.download_button("⬇️ Download PDF Receipt", data=pdf_bytes, file_name=f"StreamHeart_Payout_{c_data.get('creator_handle', 'Creator')}_{pd.to_datetime(sel_pdf_payout['created_at']).strftime('%Y%m%d')}.pdf", mime="application/pdf", width="stretch")
+            st.download_button(
+                "⬇️ Download PDF Receipt",
+                data=pdf_bytes,
+                file_name=f"StreamHeart_Payout_{c_data.get('creator_handle', 'Creator')}_{pd.to_datetime(sel_pdf_payout['created_at']).strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                width="stretch"
+            )
 
     st.divider()
     st.markdown("### 🗑️ Rollback / Delete Payout (Emergency Use)")
     st.caption("Use this ONLY if you generated a payout by mistake and haven't sent the money yet.")
-    
+
     if payouts_data:
-        rollback_options = {f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})": p['id'] for p in payouts_data}
-        
+        rollback_options = {}
+        for p in payouts_data:
+            label = f"{get_creator_name(p.get('creators'))} - {format_inr(p.get('creator_share_inr', 0))} ({pd.to_datetime(p['created_at']).strftime('%d %b %Y')})"
+            rollback_options[label] = p['id']
+
         with st.form("rollback_form"):
             sel_rollback_label = st.selectbox("Select Payout to Rollback", options=list(rollback_options.keys()), key="rollback_sel")
             sel_rollback_id = rollback_options[sel_rollback_label]
-            
+
             if st.form_submit_button("⚠️ Rollback & Unlock Payments", type="secondary", width="stretch"):
                 try:
                     supabase.table('payments').update({"is_settled": False, "payout_id": None}).eq('payout_id', sel_rollback_id).execute()
                     supabase.table('payouts').delete().eq('id', sel_rollback_id).execute()
-                    st.success("✅ Payout rolled back successfully. Payments are now unsettled.")
+                    st.success("✅ Payout rolled back successfully.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Rollback failed: {e}")

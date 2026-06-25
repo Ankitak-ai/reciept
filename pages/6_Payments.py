@@ -6,7 +6,7 @@ import datetime
 from zoneinfo import ZoneInfo
 from utils.supabase_client import supabase
 from utils.auth import require_auth
-from utils.helpers import format_inr, to_ist
+from utils.helpers import format_inr
 
 require_auth()
 
@@ -15,6 +15,15 @@ st.title("💳 Razorpay Payment Sync & Management")
 
 IST = ZoneInfo("Asia/Kolkata")
 today_ist = datetime.datetime.now(IST).date()
+
+# ✅ BULLETPROOF IST CONVERTER
+def safe_to_ist(dt_val):
+    try:
+        # Force pandas to read the DB time as UTC, then shift it to Asia/Kolkata
+        dt = pd.to_datetime(dt_val, utc=True)
+        return dt.tz_convert("Asia/Kolkata").strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return str(dt_val)
 
 # ==============================================================================
 # 1. SYNC CONTROLS
@@ -35,7 +44,7 @@ last_sync_str = "Beginning of time"
 if latest_res.data and len(latest_res.data) > 0:
     last_sync_dt = datetime.datetime.fromisoformat(latest_res.data[0]['created_at'].replace('Z', '+00:00'))
     from_timestamp = int(last_sync_dt.timestamp())
-    last_sync_str = last_sync_dt.strftime('%d %b %Y %H:%M IST')
+    last_sync_str = last_sync_dt.astimezone(IST).strftime('%d %b %Y, %I:%M %p IST')
 
 st.caption(f"💡 **Smart Sync:** Database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data.")
 
@@ -82,7 +91,7 @@ with col1:
                 
         progress_bar.progress(100)
         msg = f"Synced {total_synced} new payments and {total_refunds} refunds." if total_synced > 0 else "Database is already 100% up to date!"
-        st.session_state['last_sync_result'] = {"message": msg, "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")}
+        st.session_state['last_sync_result'] = {"message": msg, "time": datetime.datetime.now(IST).strftime("%I:%M %p IST")}
         if total_synced > 0: st.balloons()
         st.rerun()
 
@@ -101,7 +110,7 @@ with col2:
                     result = response.json()
                     st.session_state['last_sync_result'] = {
                         "message": result.get('message', 'Auto-remap complete.'), 
-                        "time": datetime.datetime.now(IST).strftime("%H:%M:%S IST")
+                        "time": datetime.datetime.now(IST).strftime("%I:%M %p IST")
                     }
                     st.balloons()
                     st.rerun()
@@ -113,10 +122,10 @@ with col2:
 st.divider()
 
 # ==============================================================================
-# 2. GLOBAL PAYMENTS LEDGER (✅ UPDATED WITH CURRENCY FIX)
+# 2. GLOBAL PAYMENTS LEDGER
 # ==============================================================================
 st.markdown("### 📜 Global Payments Ledger")
-st.caption("Showing the last 100 successful payments across all creators. (Timestamps are in IST).")
+st.caption("Showing the last 100 successful payments across all creators.")
 
 payments_res = supabase.table('payments').select(
     '*, creators:creator_id(creator_handle, creator_code)'
@@ -132,18 +141,20 @@ else:
     df_payments['Creator'] = df_payments['creators'].apply(lambda x: x['creator_handle'] if x else 'Unmapped')
     df_payments['Code'] = df_payments['creators'].apply(lambda x: x['creator_code'] if x else '-')
     
-    # ✅ NEW: Create an "Original" column that shows foreign currency amounts
-    df_payments['Original'] = df_payments.apply(
-        lambda row: f"{row['original_currency']} {(row['original_amount'] or 0)/100:.2f}" 
-        if row.get('original_currency') and row['original_currency'] != 'INR' else '', 
-        axis=1
-    )
+    def format_original(row):
+        if row.get('original_currency') and row['original_currency'] != 'INR':
+            original_amt = (row['original_amount'] or 0) / 100
+            return f"{row['original_currency']} {original_amt:.2f}"
+        return ''
+    
+    df_payments['Original'] = df_payments.apply(format_original, axis=1)
     
     df_payments['Gross (INR)'] = df_payments['amount_inr'].apply(format_inr)
     df_payments['Fees (INR)'] = df_payments['fee_inr'].apply(format_inr)
-    df_payments['Date (IST)'] = df_payments['created_at'].apply(to_ist)
     
-    # ✅ UPDATED: Replaced 'original_currency' with our new 'Original' column
+    # ✅ APPLY BULLETPROOF IST CONVERSION
+    df_payments['Date (IST)'] = df_payments['created_at'].apply(safe_to_ist)
+    
     display_cols = ['Date (IST)', 'payment_id', 'Creator', 'Code', 'Original', 'Gross (INR)', 'Fees (INR)', 'method', 'status']
     
     st.dataframe(df_payments[display_cols], width="stretch", hide_index=True)
@@ -156,14 +167,13 @@ else:
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Gross (Last 100)", format_inr(total_gross))
     m2.metric("Total Razorpay Fees", format_inr(total_fees))
-    m3.metric("Unmapped Payments (Last 100)", unmapped_count, help="Payments where the creator code was missing or invalid.")
+    m3.metric("Unmapped Payments (Last 100)", unmapped_count)
 
 # ==============================================================================
 # 3. UNMAPPED PAYMENTS DEBUG TABLE
 # ==============================================================================
 st.divider()
 st.markdown("### 🔗 Unmapped Payments & Missing Creator Codes")
-st.caption("If a payment is unmapped, it means the creator code attached to the Razorpay receipt doesn't exist in your CMS yet. Use this table to see exactly which codes you need to add.")
 
 unmapped_res = supabase.table('payments').select(
     'payment_id, amount_inr, created_at, receipt, creator_code_attempted'
@@ -174,10 +184,12 @@ unmapped_data = unmapped_res.data if (unmapped_res and unmapped_res.data) else [
 if not unmapped_data:
     st.success("🎉 **Perfect!** All payments in the database are successfully mapped to creators!")
 else:
-    st.warning(f"⚠️ There are currently **{len(unmapped_data)}** unmapped payments. See the exact Razorpay codes below:")
+    st.warning(f"⚠️ There are currently **{len(unmapped_data)}** unmapped payments.")
     
     df_unmapped = pd.DataFrame(unmapped_data)
-    df_unmapped['Date (IST)'] = df_unmapped['created_at'].apply(to_ist)
+    
+    # ✅ APPLY BULLETPROOF IST CONVERSION
+    df_unmapped['Date (IST)'] = df_unmapped['created_at'].apply(safe_to_ist)
     df_unmapped['Amount (INR)'] = df_unmapped['amount_inr'].apply(format_inr)
     
     df_unmapped = df_unmapped.rename(columns={
@@ -188,11 +200,9 @@ else:
     display_unmapped = df_unmapped[['Date (IST)', 'Amount (INR)', 'Attempted Creator Code', 'Raw Razorpay Receipt', 'payment_id']]
     
     st.dataframe(display_unmapped, width="stretch", hide_index=True, column_config={
-        "Date (IST)": st.column_config.TextColumn("Date", width="small"),
+        "Date (IST)": st.column_config.TextColumn("Date (IST)", width="small"),
         "Amount (INR)": st.column_config.TextColumn("Amount", width="small"),
-        "Attempted Creator Code": st.column_config.TextColumn("Missing Code to Add", width="medium"),
-        "Raw Razorpay Receipt": st.column_config.TextColumn("Raw Receipt String", width="large"),
+        "Attempted Creator Code": st.column_config.TextColumn("Missing Code", width="medium"),
+        "Raw Razorpay Receipt": st.column_config.TextColumn("Raw Receipt", width="large"),
         "payment_id": st.column_config.TextColumn("Payment ID", width="medium")
     })
-    
-    st.info("💡 **Action Required:** Look at the **Attempted Creator Code** column. If you see a code like `xyz`, go to the **Creator List** page and add a new creator with the code `xyz`. Once added, click the **Auto-Remap** button at the top of this page to link these payments instantly!")

@@ -1,7 +1,7 @@
-# pages/9_Receipts.py
 import streamlit as st
 import pandas as pd
 import traceback
+import datetime
 from utils.supabase_client import supabase
 from utils.auth import require_auth
 from utils.pdf_receipt_generator import generate_receipt_pdf, upload_receipt_to_supabase, format_inr
@@ -14,7 +14,7 @@ st.title("📄 Payout Receipt Generation")
 # Fetch Company Details
 try:
     company_res = supabase.table('company_settings').select('setting_key', 'setting_value').execute()
-    company = {row['setting_key']: row['setting_value'] for row in company_res.data}
+    company = {row['setting_key']: row['setting_value'] for row in company_res.data} if company_res.data else {}
 except Exception as e:
     st.error(f"❌ Failed to load company settings: {e}")
     company = {}
@@ -54,39 +54,51 @@ with tab_generate:
                     success_count = 0
                     
                     for idx, payout in enumerate(pending_payouts):
-                        creator = payout['creators']
-                        creator_name = creator['creator_handle'] if creator else 'Unknown'
-                        status_text.text(f"Generating 2-page receipt for {creator_name}...")
+                        creator = payout.get('creators')
+                        creator_name = creator.get('creator_handle') if creator else 'Unknown'
+                        status_text.text(f"Generating receipt for {creator_name}...")
                         
                         try:
                             # 1. Generate sequential receipt number
-                            today = __import__('datetime').datetime.now()
+                            today = datetime.datetime.now()
                             prefix = f"SH-PAYOUT-{today.strftime('%Y%m')}"
                             res = supabase.table('payout_receipts').select('receipt_number').like('receipt_number', f'{prefix}-%').order('receipt_number', desc=True).limit(1).execute()
                             new_num = int(res.data[0]['receipt_number'].split('-')[-1]) + 1 if res.data else 1
                             receipt_number = f"{prefix}-{str(new_num).zfill(6)}"
                             
-                            # 2. Build the 2-Page PDF (Returns bytes and the true SHA256 hash of the final PDF)
+                            # 2. Build the PDF
                             pdf_bytes, final_pdf_hash = generate_receipt_pdf(payout, creator, company, receipt_number)
                             
-                            # 3. Upload to Private Storage Bucket
-                            pdf_url = upload_receipt_to_supabase(supabase, pdf_bytes, receipt_number)
+                            # 3. Upload to Storage (ISOLATED ERROR CATCHING)
+                            try:
+                                pdf_url = upload_receipt_to_supabase(supabase, pdf_bytes, receipt_number)
+                            except Exception as storage_err:
+                                st.error(f"📁 **STORAGE UPLOAD FAILED** for {creator_name}: {storage_err}")
+                                st.info("👉 Go to Supabase Dashboard -> Storage -> Select the bucket -> Settings -> Make it PUBLIC.")
+                                continue # Skip to next payout
                             
-                            # 4. Save to Database
-                            supabase.table('payout_receipts').insert({
-                                "receipt_number": receipt_number,
-                                "payout_id": payout['id'],
-                                "creator_id": creator['id'],
-                                "gross_amount": payout['gross_amount_inr'],
-                                "net_amount": payout['creator_share_inr'],
-                                "pdf_url": pdf_url,
-                                "receipt_hash": final_pdf_hash,
-                                "generated_by": st.session_state.get('user_email', 'System')
-                            }).execute()
+                            # 4. Save to Database (ISOLATED ERROR CATCHING)
+                            try:
+                                supabase.table('payout_receipts').insert({
+                                    "receipt_number": receipt_number,
+                                    "payout_id": payout['id'],
+                                    "creator_id": creator['id'],
+                                    "gross_amount": payout.get('gross_amount_inr'),
+                                    "net_amount": payout.get('creator_share_inr'),
+                                    "pdf_url": pdf_url,
+                                    "receipt_hash": final_pdf_hash,
+                                    "generated_by": st.session_state.get('user_email', 'System')
+                                }).execute()
+                            except Exception as db_err:
+                                st.error(f"🗄️ **DATABASE INSERT FAILED** for {creator_name}: {db_err}")
+                                st.info("👉 Run the 'Nuke' SQL script in the Supabase SQL Editor to disable RLS.")
+                                continue # Skip to next payout
                             
                             success_count += 1
+                            
                         except Exception as e:
-                            st.error(f"Failed for {creator_name}: {str(e)}")
+                            st.error(f"❌ General Error for {creator_name}: {str(e)}")
+                            st.code(traceback.format_exc())
                         
                         progress_bar.progress((idx + 1) / len(pending_payouts))
                     
@@ -117,8 +129,10 @@ with tab_ledger:
         else:
             df_receipts = pd.DataFrame(receipts_res.data)
             df_receipts['Creator'] = df_receipts['creators'].apply(lambda x: x['creator_handle'] if x else 'Unknown')
-            df_receipts['Gross'] = df_receipts['gross_amount'].apply(lambda x: f"₹{x/100:.2f}" if x else "₹0.00")
-            df_receipts['Net Payout'] = df_receipts['net_amount'].apply(lambda x: f"₹{x/100:.2f}" if x else "₹0.00")
+            
+            # Safe formatting for amounts (assuming they are stored in paisa or rupees based on your schema)
+            df_receipts['Gross'] = df_receipts['gross_amount'].apply(lambda x: f"₹{x:,.2f}" if x else "₹0.00")
+            df_receipts['Net Payout'] = df_receipts['net_amount'].apply(lambda x: f"₹{x:,.2f}" if x else "₹0.00")
             
             st.dataframe(df_receipts[['generated_at', 'receipt_number', 'Creator', 'Gross', 'Net Payout']], 
                         use_container_width=True, hide_index=True)
@@ -131,9 +145,12 @@ with tab_ledger:
                 with col1:
                     st.write(f"**{row['receipt_number']}** - {row['Creator']} ({row['Net Payout']})")
                 with col2:
-                    st.caption("Generated: " + str(row['generated_at'])[:10])
+                    st.caption("Generated: " + str(row['generated_at'])[:10] if row.get('generated_at') else "N/A")
                 with col3:
                     if st.button("⬇️ Download PDF", key=row['id']):
-                        st.components.v1.html(f'<script>window.open("{row["pdf_url"]}", "_blank");</script>', height=0)
+                        if row.get('pdf_url'):
+                            st.components.v1.html(f'<script>window.open("{row["pdf_url"]}", "_blank");</script>', height=0)
+                        else:
+                            st.warning("No PDF URL found.")
     except Exception as e:
         st.error(f"❌ Failed to load receipts: {e}")

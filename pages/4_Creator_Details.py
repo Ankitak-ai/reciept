@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from zoneinfo import ZoneInfo
 from utils.supabase_client import supabase
 from utils.auth import require_auth
 from utils.validators import validate_pan
@@ -8,6 +9,15 @@ require_auth()
 
 st.set_page_config(page_title="Creator Details", page_icon="👤", layout="wide")
 st.title("👤 Creator Details")
+
+# ✅ BULLETPROOF IST CONVERTER
+def safe_to_ist(dt_val):
+    try:
+        # Force pandas to read the DB time as UTC, then shift it to Asia/Kolkata
+        dt = pd.to_datetime(dt_val, utc=True)
+        return dt.tz_convert("Asia/Kolkata").strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(dt_val)
 
 if 'selected_creator_id' not in st.session_state:
     st.warning("Please select a creator from the Creator List.")
@@ -101,9 +111,12 @@ if not edit_mode:
             df_payments = pd.DataFrame(payments_data)
             df_payments['Gross (INR)'] = df_payments['amount_inr'].apply(format_inr)
             df_payments['Fees (INR)'] = df_payments['fee_inr'].apply(format_inr)
-            display_payments = df_payments[['created_at', 'payment_id', 'original_currency', 'Gross (INR)', 'Fees (INR)', 'method', 'status']]
-            display_payments = display_payments.rename(columns={'created_at': 'Date'})
-            st.dataframe(display_payments, width="stretch", hide_index=True, column_config={"Date": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm")})
+            
+            # ✅ APPLY BULLETPROOF IST CONVERSION
+            df_payments['Date (IST)'] = df_payments['created_at'].apply(safe_to_ist)
+            
+            display_payments = df_payments[['Date (IST)', 'payment_id', 'original_currency', 'Gross (INR)', 'Fees (INR)', 'method', 'status']]
+            st.dataframe(display_payments, width="stretch", hide_index=True)
 
         st.divider()
 
@@ -114,8 +127,12 @@ if not edit_mode:
         else:
             df_refunds = pd.DataFrame(refunds_data)
             df_refunds['Deducted (INR)'] = df_refunds['amount_inr'].apply(format_inr)
-            display_refunds = df_refunds[['created_at', 'refund_id', 'payment_id', 'Deducted (INR)', 'status']].rename(columns={'created_at': 'Date'})
-            st.dataframe(display_refunds, width="stretch", hide_index=True, column_config={"Date": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm")})
+            
+            # ✅ APPLY BULLETPROOF IST CONVERSION
+            df_refunds['Date (IST)'] = df_refunds['created_at'].apply(safe_to_ist)
+            
+            display_refunds = df_refunds[['Date (IST)', 'refund_id', 'payment_id', 'Deducted (INR)', 'status']]
+            st.dataframe(display_refunds, width="stretch", hide_index=True)
 
 # ==============================================================================
 # EDIT MODE

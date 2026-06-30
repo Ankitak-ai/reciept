@@ -19,7 +19,6 @@ today_ist = datetime.datetime.now(IST).date()
 # ✅ BULLETPROOF IST CONVERTER
 def safe_to_ist(dt_val):
     try:
-        # Force pandas to read the DB time as UTC, then shift it to Asia/Kolkata
         dt = pd.to_datetime(dt_val, utc=True)
         return dt.tz_convert("Asia/Kolkata").strftime("%d %b %Y, %I:%M %p")
     except Exception:
@@ -51,7 +50,7 @@ st.caption(f"💡 **Smart Sync:** Database is up to date as of **{last_sync_str}
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("🔄 Sync New & Missing Data", type="primary", width="stretch"):
+    if st.button("🔄 Sync New & Missing Data", type="primary", use_container_width=True):
         function_url = st.secrets.get("BACKFILL_URL")
         secret_token = st.secrets.get("BACKFILL_SECRET")
         anon_key = st.secrets.get("SUPABASE_ANON_KEY")
@@ -96,7 +95,7 @@ with col1:
         st.rerun()
 
 with col2:
-    if st.button("🔗 Auto-Remap Unmapped Payments", type="secondary", width="stretch"):
+    if st.button("🔗 Auto-Remap Unmapped Payments", type="secondary", use_container_width=True):
         function_url = st.secrets.get("BACKFILL_URL").replace('/backfill', '/auto-remap')
         secret_token = st.secrets.get("BACKFILL_SECRET")
         anon_key = st.secrets.get("SUPABASE_ANON_KEY")
@@ -122,10 +121,10 @@ with col2:
 st.divider()
 
 # ==============================================================================
-# 2. GLOBAL PAYMENTS LEDGER
+# 2. GLOBAL PAYMENTS LEDGER (UI Table Only)
 # ==============================================================================
 st.markdown("### 📜 Global Payments Ledger")
-st.caption("Showing the last 100 successful payments across all creators.")
+st.caption("Showing the last 100 payments across all creators for quick viewing.")
 
 payments_res = supabase.table('payments').select(
     '*, creators:creator_id(creator_handle, creator_code)'
@@ -148,29 +147,42 @@ else:
         return ''
     
     df_payments['Original'] = df_payments.apply(format_original, axis=1)
-    
     df_payments['Gross (INR)'] = df_payments['amount_inr'].apply(format_inr)
     df_payments['Fees (INR)'] = df_payments['fee_inr'].apply(format_inr)
-    
-    # ✅ APPLY BULLETPROOF IST CONVERSION
     df_payments['Date (IST)'] = df_payments['created_at'].apply(safe_to_ist)
     
     display_cols = ['Date (IST)', 'payment_id', 'Creator', 'Code', 'Original', 'Gross (INR)', 'Fees (INR)', 'method', 'status']
     
     st.dataframe(df_payments[display_cols], width="stretch", hide_index=True)
-    
-    total_gross = sum(p.get('amount_inr', 0) or 0 for p in payments_data)
-    total_fees = sum(p.get('fee_inr', 0) or 0 for p in payments_data)
-    unmapped_count = len([p for p in payments_data if not p.get('creator_id')])
-    
-    st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Gross (Last 100)", format_inr(total_gross))
-    m2.metric("Total Razorpay Fees", format_inr(total_fees))
-    m3.metric("Unmapped Payments (Last 100)", unmapped_count)
 
 # ==============================================================================
-# 3. UNMAPPED PAYMENTS DEBUG TABLE
+# 3. TRUE 30-DAY FINANCIAL METRICS (MATCHES RAZORPAY EXACTLY)
+# ==============================================================================
+st.divider()
+st.markdown("### 📊 True Financial Metrics (Last 30 Days)")
+st.caption("This exactly matches Razorpay's 'Amount Collected' logic: (Captured Payments) - (Refunds).")
+
+# Calculate exactly 30 days ago in ISO format
+thirty_days_ago = (datetime.datetime.now(IST) - datetime.timedelta(days=30)).isoformat()
+
+# 1. Fetch ALL captured payments from the last 30 days (Bypassing the 100 row limit!)
+captured_res = supabase.table('payments').select('amount_inr').eq('status', 'captured').gte('created_at', thirty_days_ago).execute()
+total_captured_30d = sum(p.get('amount_inr', 0) or 0 for p in (captured_res.data or []))
+
+# 2. Fetch ALL refunds from the last 30 days
+refunds_res = supabase.table('refunds').select('amount_inr').gte('created_at', thirty_days_ago).execute()
+total_refunds_30d = sum(r.get('amount_inr', 0) or 0 for r in (refunds_res.data or []))
+
+# 3. Calculate TRUE Net Collected
+true_net_collected = total_captured_30d - total_refunds_30d
+
+m1, m2, m3 = st.columns(3)
+m1.metric("💰 True Collected (Last 30 Days)", format_inr(true_net_collected))
+m2.metric("✅ Total Captured (Last 30 Days)", format_inr(total_captured_30d))
+m3.metric("↩️ Total Refunds (Last 30 Days)", format_inr(total_refunds_30d), delta_color="inverse")
+
+# ==============================================================================
+# 4. UNMAPPED PAYMENTS DEBUG TABLE
 # ==============================================================================
 st.divider()
 st.markdown("### 🔗 Unmapped Payments & Missing Creator Codes")
@@ -187,8 +199,6 @@ else:
     st.warning(f"⚠️ There are currently **{len(unmapped_data)}** unmapped payments.")
     
     df_unmapped = pd.DataFrame(unmapped_data)
-    
-    # ✅ APPLY BULLETPROOF IST CONVERSION
     df_unmapped['Date (IST)'] = df_unmapped['created_at'].apply(safe_to_ist)
     df_unmapped['Amount (INR)'] = df_unmapped['amount_inr'].apply(format_inr)
     

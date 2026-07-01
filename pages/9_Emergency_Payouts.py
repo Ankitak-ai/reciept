@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import base64  # ✅ FIX: Import the standard Python base64 library
 import io
 import time
 from utils.auth import require_auth
@@ -19,7 +20,8 @@ if not key_id or not key_secret:
     st.error("Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to Streamlit Secrets!")
     st.stop()
 
-auth_header = "Basic " + requests.compat.base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+# ✅ FIX: Use the standard base64 library instead of requests.compat.base64
+auth_header = "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
 
 # 2. Fetch Creators from Supabase
 creators_res = supabase.table("creators").select("id, creator_code, creator_handle, payout_rate").execute()

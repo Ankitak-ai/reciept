@@ -14,9 +14,7 @@ st.set_page_config(page_title="Razorpay Payments", page_icon="💳", layout="wid
 st.title("💳 Razorpay Payment Sync & Management")
 
 IST = ZoneInfo("Asia/Kolkata")
-today_ist = datetime.datetime.now(IST).date()
 
-# ✅ BULLETPROOF IST CONVERTER
 def safe_to_ist(dt_val):
     try:
         dt = pd.to_datetime(dt_val, utc=True)
@@ -25,7 +23,7 @@ def safe_to_ist(dt_val):
         return str(dt_val)
 
 # ==============================================================================
-# 1. SYNC CONTROLS
+# 1. SYNC CONTROLS (WITH REWOUND WATERMARK)
 # ==============================================================================
 st.markdown("### 🔄 Sync Controls")
 
@@ -36,16 +34,19 @@ if 'last_sync_result' in st.session_state:
         del st.session_state['last_sync_result']
         st.rerun()
 
+# 🔥 THE FIX: Rewind the watermark to catch status changes (authorized -> captured)
+SAFETY_WINDOW = 3 * 24 * 60 * 60  # 3 days in seconds
 latest_res = supabase.table('payments').select('created_at').order('created_at', desc=True).limit(1).execute()
 from_timestamp = 0
 last_sync_str = "Beginning of time"
 
 if latest_res.data and len(latest_res.data) > 0:
     last_sync_dt = datetime.datetime.fromisoformat(latest_res.data[0]['created_at'].replace('Z', '+00:00'))
-    from_timestamp = int(last_sync_dt.timestamp())
+    # REWIND BY 3 DAYS
+    from_timestamp = max(0, int(last_sync_dt.timestamp()) - SAFETY_WINDOW)
     last_sync_str = last_sync_dt.astimezone(IST).strftime('%d %b %Y, %I:%M %p IST')
 
-st.caption(f"💡 **Smart Sync:** Database is up to date as of **{last_sync_str}**. Clicking sync will only fetch *new* data.")
+st.caption(f"💡 **Smart Sync with Safety Window:** Database is up to date as of **{last_sync_str}**. Syncing will rewind 3 days to catch any payments that recently changed status.")
 
 col1, col2 = st.columns(2)
 
@@ -70,7 +71,7 @@ with col1:
         status_text = st.empty()
         
         while True:
-            status_text.info(f"⏳ Fetching batch... Total new synced: {total_synced}")
+            status_text.info(f"⏳ Fetching batch... (Skip: {skip}) Total new synced: {total_synced}")
             payload = {"skip": skip, "limit": batch_size, "from_timestamp": from_timestamp}
             
             try:
@@ -79,7 +80,12 @@ with col1:
                     result = response.json()
                     total_synced += result.get("payments_synced", 0)
                     total_refunds += result.get("refunds_synced", 0)
-                    if result.get("processed_count", 0) == 0: break
+                    
+                    # 🔥 SAFETY CHECK: Don't blindly trust processed_count == 0 if we got a partial batch
+                    processed = result.get("processed_count", 0)
+                    if processed == 0 or processed < batch_size: 
+                        break
+                        
                     skip += batch_size
                 else:
                     st.error(f"Server error: {response.text}")
@@ -121,7 +127,32 @@ with col2:
 st.divider()
 
 # ==============================================================================
-# 2. GLOBAL PAYMENTS LEDGER (UI Table Only)
+# 2. REAL-TIME LEAK INDICATOR (STALE PAYMENTS)
+# ==============================================================================
+st.markdown("### 🚨 Real-Time Leak Indicator (Stale Payments)")
+st.caption("Payments stuck in 'authorized' for over 1 hour. These are not yet captured and represent potential revenue leaks.")
+
+one_hour_ago = (datetime.datetime.now(IST) - datetime.timedelta(hours=1)).isoformat()
+stale_res = supabase.table('payments').select('payment_id, amount_inr, created_at, creator_id').eq('status', 'authorized').lt('created_at', one_hour_ago).execute()
+stale_data = stale_res.data or []
+
+if not stale_data:
+    st.success("✅ **No Leaks Detected:** All recent payments have successfully captured or failed.")
+else:
+    stale_amount = sum(p.get('amount_inr', 0) or 0 for p in stale_data)
+    st.error(f"⚠️ **{len(stale_data)} payments** totaling **{format_inr(stale_amount)}** are stuck in 'authorized' status for over 1 hour!")
+    
+    df_stale = pd.DataFrame(stale_data)
+    df_stale['Date (IST)'] = df_stale['created_at'].apply(safe_to_ist)
+    df_stale['Amount (INR)'] = df_stale['amount_inr'].apply(format_inr)
+    df_stale['Mapped?'] = df_stale['creator_id'].apply(lambda x: 'Yes' if x else 'No')
+    
+    st.dataframe(df_stale[['Date (IST)', 'Amount (INR)', 'Mapped?', 'payment_id']], hide_index=True)
+
+st.divider()
+
+# ==============================================================================
+# 3. GLOBAL PAYMENTS LEDGER
 # ==============================================================================
 st.markdown("### 📜 Global Payments Ledger")
 st.caption("Showing the last 100 payments across all creators for quick viewing.")
@@ -156,24 +187,20 @@ else:
     st.dataframe(df_payments[display_cols], width="stretch", hide_index=True)
 
 # ==============================================================================
-# 3. TRUE 30-DAY FINANCIAL METRICS (MATCHES RAZORPAY EXACTLY)
+# 4. TRUE 30-DAY FINANCIAL METRICS (MATCHES RAZORPAY EXACTLY)
 # ==============================================================================
 st.divider()
 st.markdown("### 📊 True Financial Metrics (Last 30 Days)")
 st.caption("This exactly matches Razorpay's 'Amount Collected' logic: (Captured Payments) - (Refunds).")
 
-# Calculate exactly 30 days ago in ISO format
 thirty_days_ago = (datetime.datetime.now(IST) - datetime.timedelta(days=30)).isoformat()
 
-# 1. Fetch ALL captured payments from the last 30 days (Bypassing the 100 row limit!)
 captured_res = supabase.table('payments').select('amount_inr').eq('status', 'captured').gte('created_at', thirty_days_ago).execute()
 total_captured_30d = sum(p.get('amount_inr', 0) or 0 for p in (captured_res.data or []))
 
-# 2. Fetch ALL refunds from the last 30 days
 refunds_res = supabase.table('refunds').select('amount_inr').gte('created_at', thirty_days_ago).execute()
 total_refunds_30d = sum(r.get('amount_inr', 0) or 0 for r in (refunds_res.data or []))
 
-# 3. Calculate TRUE Net Collected
 true_net_collected = total_captured_30d - total_refunds_30d
 
 m1, m2, m3 = st.columns(3)
@@ -182,7 +209,7 @@ m2.metric("✅ Total Captured (Last 30 Days)", format_inr(total_captured_30d))
 m3.metric("↩️ Total Refunds (Last 30 Days)", format_inr(total_refunds_30d), delta_color="inverse")
 
 # ==============================================================================
-# 4. UNMAPPED PAYMENTS DEBUG TABLE
+# 5. UNMAPPED PAYMENTS DEBUG TABLE
 # ==============================================================================
 st.divider()
 st.markdown("### 🔗 Unmapped Payments & Missing Creator Codes")
